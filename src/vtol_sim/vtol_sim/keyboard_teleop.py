@@ -24,12 +24,13 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 
-# v2 kamikaze: faster than v1 (3.0 m/s) for the chase, but kept under the
-# Gazebo controller's cap (maximumLinearVelocity = 8 m/s in vtol_world.sdf) with
-# headroom so commands don't constantly saturate. Yaw kept gentle — aggressive
-# yaw disturbs the thrust mix and causes altitude dip / instability.
-LINEAR_SPEED  = 7.0   # m/s
-ANGULAR_SPEED = 0.9   # rad/s
+# v1's proven-stable speeds. Raising LINEAR_SPEED (tried 7-9 m/s) makes the
+# velocity controller pitch over hard to accelerate and, with these gains, the
+# X3 over-tilts and flips into the ground. Faster flight needs a proper
+# controller retune (gains + limits in vtol_world.sdf), not just a bigger
+# setpoint, so we keep v1's values for stable control.
+LINEAR_SPEED  = 3.0   # m/s
+ANGULAR_SPEED = 0.7   # rad/s  (gentle yaw → minimal thrust disturbance)
 PUBLISH_RATE     = 20    # Hz
 KEY_HOLD_TIMEOUT = 0.10  # seconds a key stays active after last repeat
                          # (lower = crisper stop on release; must stay above the
