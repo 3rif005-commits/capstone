@@ -24,11 +24,12 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 
-# v2 "kamikaze tuned for the chase": faster, snappier than v1 (was 3.0 m/s,
-# 0.7 rad/s) so the player is a credible, evasive target for the 26 m/s
-# interceptor. The offline study uses 10–16 m/s targets; tune in-sim to taste.
-LINEAR_SPEED  = 9.0   # m/s
-ANGULAR_SPEED = 1.3   # rad/s  (snappier yaw for evasive jinking)
+# v2 kamikaze: faster than v1 (3.0 m/s) for the chase, but kept under the
+# Gazebo controller's cap (maximumLinearVelocity = 8 m/s in vtol_world.sdf) with
+# headroom so commands don't constantly saturate. Yaw kept gentle — aggressive
+# yaw disturbs the thrust mix and causes altitude dip / instability.
+LINEAR_SPEED  = 7.0   # m/s
+ANGULAR_SPEED = 0.9   # rad/s
 PUBLISH_RATE     = 20    # Hz
 KEY_HOLD_TIMEOUT = 0.10  # seconds a key stays active after last repeat
                          # (lower = crisper stop on release; must stay above the
@@ -42,17 +43,11 @@ KEY_HOLD_TIMEOUT = 0.10  # seconds a key stays active after last repeat
 ALT_HOLD_KP = 1.2     # vertical velocity (m/s) commanded per metre of error
 ALT_HOLD_VZ_MAX = 2.0  # cap on the hold's corrective climb/descent rate (m/s)
 
-# Horizontal position hold (loiter). Same idea as altitude hold but for X/Y:
-# the plugin only zeroes horizontal velocity when you release a key, so the
-# drone coasts ~1.5 m before stopping (feels like lag/hysteresis). When no
-# translation is commanded we instead brake to and hold the last X/Y position.
-POS_HOLD_KP = 1.0      # horizontal velocity (m/s) commanded per metre of error
-POS_HOLD_KD = 0.8      # velocity damping: subtracts current speed to avoid
-                       # overshoot/oscillation (makes the hold a PD controller)
-POS_HOLD_V_MAX = 3.0   # cap on the hold's corrective speed (m/s)
-POS_HOLD_BRAKE_SPEED = 0.3  # below this speed we latch and hold position; above
-                            # it we just brake (avoids flying back to the point
-                            # where the key was released)
+# Horizontal behaviour (v2): release-to-stop. v1 held a *latched* X/Y position
+# (loiter), which for the kamikaze attack run felt like the drone "returning to
+# its start" on its own. Instead, when no translation is commanded we simply
+# command zero horizontal velocity — the controller brakes to a stop in place,
+# with no fly-back to any held point.
 
 HELP = """
 VTOL Drone Keyboard Teleop  (simultaneous keys supported)
@@ -153,9 +148,6 @@ class KeyboardTeleop(Node):
         self._R = np.eye(3)
         self._z_now = None
         self._z_target = None
-        self._xy_now = None        # current world (x, y)
-        self._xy_target = None     # held world (x, y)
-        self._v_world = np.zeros(2)  # current world (vx, vy)
         # Scoped by model name "x3" (lowercase), not the "X3" robotNamespace.
         self.create_subscription(
             Odometry, '/model/x3/odometry', self._on_odom, 10)
@@ -176,11 +168,6 @@ class KeyboardTeleop(Node):
         self._R = quat_to_rotation_matrix(q.x, q.y, q.z, q.w)
         p = msg.pose.pose.position
         self._z_now = p.z
-        self._xy_now = np.array([p.x, p.y])
-        # Odometry twist is in the body frame; rotate to world for the hold's
-        # damping term.
-        vb = msg.twist.twist.linear
-        self._v_world = (self._R @ np.array([vb.x, vb.y, vb.z]))[:2]
 
     def _read_keys(self):
         """Non-blocking drain of all available stdin bytes."""
@@ -231,33 +218,17 @@ class KeyboardTeleop(Node):
             err = self._z_target - self._z_now
             up = max(-ALT_HOLD_VZ_MAX, min(ALT_HOLD_VZ_MAX, ALT_HOLD_KP * err))
 
-        # Horizontal velocity we want in the WORLD frame. While the pilot is
-        # commanding translation, use a heading frame (forward = where the nose
-        # points) and remember the position. Otherwise brake to and hold the
-        # last X/Y with a P controller, so releasing a key stops the drone
-        # promptly instead of letting it coast (the "hysteresis").
+        # Horizontal velocity in the WORLD frame. While the pilot commands
+        # translation, fly in the heading frame (forward = where the nose
+        # points). Otherwise command zero velocity so the controller brakes to a
+        # stop in place — no fly-back to a held position (v1's loiter behaviour).
         yaw = math.atan2(self._R[1, 0], self._R[0, 0])
         cy, sy = math.cos(yaw), math.sin(yaw)
-        if horiz > 1e-6 or self._xy_now is None:
-            # Pilot commanding translation: obey, and drop any held target.
+        if horiz > 1e-6:
             vx_w = fwd * cy - left * sy
             vy_w = fwd * sy + left * cy
-            self._xy_target = None
-        elif np.linalg.norm(self._v_world) > POS_HOLD_BRAKE_SPEED:
-            # Released but still moving: brake (command zero velocity) and don't
-            # latch a target yet, so we stop where momentum carries us instead
-            # of flying back to the release point.
-            vx_w = vy_w = 0.0
-            self._xy_target = None
         else:
-            # Stopped: hold this position with a PD controller (D term damps
-            # drift so it doesn't hunt).
-            if self._xy_target is None:
-                self._xy_target = self._xy_now
-            cmd = POS_HOLD_KP * (self._xy_target - self._xy_now) \
-                - POS_HOLD_KD * self._v_world
-            vx_w = max(-POS_HOLD_V_MAX, min(POS_HOLD_V_MAX, cmd[0]))
-            vy_w = max(-POS_HOLD_V_MAX, min(POS_HOLD_V_MAX, cmd[1]))
+            vx_w = vy_w = 0.0
 
         v_world = np.array([vx_w, vy_w, up])  # world X, Y, Z(altitude)
 
