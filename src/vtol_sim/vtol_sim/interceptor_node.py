@@ -137,6 +137,7 @@ class InterceptorNode(Node):
         self._fw: FixedWing | None = None
         self._active = False
         self._spawned = False
+        self._model_ready = False   # True once Gazebo confirms the model exists
         self._last_bank = 0.0
 
         # Arming: hold station until the kamikaze starts moving.
@@ -190,15 +191,25 @@ class InterceptorNode(Node):
                 pass
             time.sleep(1.0)
 
-    # ── Gazebo spawn/remove (occasional → subprocess is fine) ─────────────
-    def _gz_spawn(self, x, y, z):
+    # ── Gazebo spawn (blocking + confirmed, in a thread) ──────────────────
+    def _spawn_model(self, x, y, z):
+        """Create the model via the blocking service and confirm it exists
+        before any set_pose is issued (avoids 'Unable to update pose' races)."""
         req = (f'sdf: "{_INTERCEPTOR_SDF}" '
                f'pose: {{position: {{x: {x:.2f} y: {y:.2f} z: {z:.2f}}}}}')
-        subprocess.Popen(
-            ['gz', 'service', '-s', f'/world/{WORLD}/create',
-             '--reqtype', 'gz.msgs.EntityFactory', '--reptype', 'gz.msgs.Boolean',
-             '--timeout', '5000', '--req', req],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            r = subprocess.run(
+                ['gz', 'service', '-s', f'/world/{WORLD}/create/blocking',
+                 '--reqtype', 'gz.msgs.EntityFactory', '--reptype', 'gz.msgs.Boolean',
+                 '--timeout', '8000', '--req', req],
+                capture_output=True, text=True, timeout=12)
+            if 'true' in r.stdout.lower():
+                self._model_ready = True
+                print('[INTERCEPTOR] model spawned in Gazebo.')
+            else:
+                print(f'[INTERCEPTOR] spawn FAILED: {r.stdout.strip()} {r.stderr.strip()}')
+        except Exception as e:
+            print(f'[INTERCEPTOR] spawn error: {e}')
 
     # ── Target odometry → world velocity / acceleration estimate ──────────
     def _on_target_odom(self, msg):
@@ -246,8 +257,9 @@ class InterceptorNode(Node):
         self._arm_grace_until = time.monotonic() + ARM_GRACE_S
 
         if not self._spawned:
-            self._gz_spawn(*pos)
             self._spawned = True
+            threading.Thread(target=self._spawn_model, args=tuple(float(c) for c in pos),
+                             daemon=True).start()
         self._active = True
         print(f'[INTERCEPTOR] holding station at {pos.round(1)} — '
               f'waiting for the kamikaze to move...')
@@ -290,7 +302,7 @@ class InterceptorNode(Node):
 
     # ── Drive the model pose in Gazebo (async, single-flight) ─────────────
     def _send_pose(self):
-        if not self._set_pose.service_is_ready():
+        if not self._model_ready or not self._set_pose.service_is_ready():
             return
         if self._pose_future is not None and not self._pose_future.done():
             return                          # previous call still in flight
