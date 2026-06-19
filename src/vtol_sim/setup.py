@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.sdf')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'models', 'x3_camera'),
             glob('models/x3_camera/*')),
     ],
@@ -25,9 +26,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'keyboard_teleop = vtol_sim.keyboard_teleop:main',
-            'game_manager    = vtol_sim.game_manager:main',
-            'engagement_sim  = vtol_sim.interception.engagement_sim:main',
+            'keyboard_teleop  = vtol_sim.keyboard_teleop:main',
+            'game_manager     = vtol_sim.game_manager:main',
+            'interceptor_node = vtol_sim.interceptor_node:main',
+            'engagement_sim   = vtol_sim.interception.engagement_sim:main',
         ],
     },
 )

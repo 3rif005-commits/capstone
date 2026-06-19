@@ -1,82 +1,95 @@
 #!/usr/bin/env python3
-"""
-Kamikaze drone game manager.
+"""v2 duel game manager — referee + episode lifecycle.
 
-Each episode: a target tank spawns at a random location.
-Fly the drone into it (kamikaze) to destroy it.
-A bird's-eye map is published on /game/minimap and shown in rqt_image_view.
+The game is a duel:
+  * YOU pilot the X3 multirotor as a KAMIKAZE, diving it into the TANK (asset).
+  * An autonomous fixed-wing INTERCEPTOR (interceptor_node) tries to reach the
+    kamikaze first, defending the tank.
+
+This node is the referee: it spawns the tank, repositions the kamikaze far out
+each episode, and decides the outcome —
+  * kamikaze reaches tank  → KAMIKAZE_WIN (you score; tank explodes)
+  * interceptor reaches kamikaze → DEFENSE_WIN (interceptor scores; kamikaze explodes)
+  * neither within the time limit → TIMEOUT
+It publishes a latched /game/reset so the interceptor re-spawns/re-aims, draws a
+tactical minimap on /game/minimap, and logs per-episode metrics to v2_metrics.csv.
 
 Run in a separate terminal:
   ros2 run vtol_sim game_manager
 """
 
+import csv
 import math
+import os
 import random
+import re
 import subprocess
 import threading
 import time
 import sys
 
-import re
 import cv2
 import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
+from std_msgs.msg import Empty, String
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
 
-HIT_DISTANCE  = 3.5    # metres: distance threshold for a kamikaze hit
-SPAWN_MIN     = 20.0   # tank at least this far from drone origin
-SPAWN_MAX     = 60.0
+TANK_HIT_DIST   = 4.0    # m: kamikaze reaches the tank → you win
+INTERCEPT_DIST  = 6.0    # m: interceptor reaches kamikaze → defense wins
+EPISODE_TIMEOUT = 90.0   # s: stalemate → new episode
+
+# Kamikaze (X3) starts as an incoming attacker: far out, at altitude.
+KAM_SPAWN_MIN_R = 90.0
+KAM_SPAWN_MAX_R = 140.0
+KAM_SPAWN_MIN_Z = 25.0
+KAM_SPAWN_MAX_Z = 40.0
+TANK_BASE_R     = 18.0   # tank spawns within this radius of origin (the base)
 
 FIREBALL_SECS = 3.0
 SMOKE_SECS    = 2.0
 
 WORLD = 'vtol_world'
+METRICS_CSV = 'v2_metrics.csv'
 
 # ── Map image ─────────────────────────────────────────────────────────────────
 
 MAP_PX    = 750          # image size (pixels, square)
-MAP_RANGE = 70.0         # world metres shown from centre to each edge
+MAP_RANGE = 150.0        # world metres from centre to each edge (engagement-scale)
 
 # ── Static world geometry (mirrored from vtol_world.sdf) ─────────────────────
-# All positions are world (wx=North, wy=West) centre + half-extents.
-
 _WORLD_ROADS = [
-    # (wx, wy, half_x, half_y, bgr)
-    (0, 0, 100, 4,   (85,  85,  85)),   # road_ns  — runs N/S, 8 m wide
-    (0, 0, 4,  100,  (85,  85,  85)),   # road_ew  — runs E/W, 8 m wide
+    (0, 0, 100, 4,   (85,  85,  85)),
+    (0, 0, 4,  100,  (85,  85,  85)),
 ]
 
 _WORLD_BUILDINGS = [
-    # (wx, wy, half_x, half_y, bgr_fill)
-    (-35,  0,    6,    4,    (155, 155, 160)),  # office_a   12×8
-    ( 30,  15,   4,    5,    (148, 150, 153)),  # office_b    8×10
-    ( 25, -20,   3,    3,    (210, 215, 220)),  # tower       6×6  (tallest)
-    (-20,  35,  12.5,  6,    (105, 108, 112)),  # warehouse  25×12
-    (-15, -30,   5,    5,    (168, 178, 192)),  # apartment  10×10
-    ( 40,   5,   4,    3,    (162, 172, 192)),  # shop_a      8×6
-    (  5,  42,   3,    4,    (156, 168, 188)),  # shop_b      6×8
-    (-40, -22,  11,    7.5,  ( 82,  86,  90)),  # factory    22×15
+    (-35,  0,    6,    4,    (155, 155, 160)),
+    ( 30,  15,   4,    5,    (148, 150, 153)),
+    ( 25, -20,   3,    3,    (210, 215, 220)),
+    (-20,  35,  12.5,  6,    (105, 108, 112)),
+    (-15, -30,   5,    5,    (168, 178, 192)),
+    ( 40,   5,   4,    3,    (162, 172, 192)),
+    (  5,  42,   3,    4,    (156, 168, 188)),
+    (-40, -22,  11,    7.5,  ( 82,  86,  90)),
 ]
 
-_CHIMNEY  = (-33, -18, 0.8)   # (wx, wy, world_radius_m)
+_CHIMNEY  = (-33, -18, 0.8)
 
 _WORLD_TREES = [
-    # (wx, wy, crown_radius_m)
     ( 18,  12, 2.3), ( 22,   8, 2.0), ( 16,  18, 2.5), ( 12,  14, 2.1),
     (-18, -12, 2.2), (-22,  -8, 2.4), (-14, -16, 2.0),
     ( -8,  28, 2.2), ( -4,  24, 2.1), (-12,  22, 2.5),
 ]
 
-# ── SDF templates (inline, single-quoted XML — no escaping needed in proto text) ──
 
 def _compact(xml: str) -> str:
-    """Strip indentation/newlines so the SDF fits on one proto-text line."""
     return re.sub(r'\s+', ' ', xml).strip()
 
 
@@ -142,29 +155,14 @@ _SMOKE_SDF = _compact("""
 """)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _world_to_px(wx: float, wy: float) -> tuple[int, int]:
-    """World coords (+X=North, +Y=West) → image (col, row) pixel."""
-    half = MAP_PX // 2
-    col = int(half + (-wy / MAP_RANGE) * half)
-    row = int(half + (-wx / MAP_RANGE) * half)
-    return (max(0, min(MAP_PX - 1, col)),
-            max(0, min(MAP_PX - 1, row)))
-
-
 def _compass(wx: float, wy: float) -> str:
     bearing = math.degrees(math.atan2(-wy, wx)) % 360
     return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][round(bearing / 45) % 8]
 
 
-def _heat(dist: float) -> str:
-    if dist > 60: return 'ICE COLD'
-    if dist > 40: return 'Cold'
-    if dist > 25: return 'Warm'
-    if dist > 15: return '** HOT **'
-    if dist > 8:  return '>>> BURNING <<<'
-    return               '!!! ON TARGET !!!'
+def _yaw_from_quat(q) -> float:
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 
 # ── Game node ─────────────────────────────────────────────────────────────────
@@ -173,46 +171,53 @@ class GameManager(Node):
     def __init__(self):
         super().__init__('game_manager')
 
-        self._drone_x   = 0.0
-        self._drone_y   = 0.0
-        self._drone_z   = 0.0
-        self._drone_yaw = 0.0   # radians, 0 = facing North (+X)
+        # Kamikaze (player) state.
+        self._kam_x = self._kam_y = self._kam_z = 0.0
+        self._kam_yaw = 0.0
+        self._kam_have = False
 
-        self._episode      = 0
-        self._scores: list[float] = []
-        self._tank_x       = 0.0
-        self._tank_y       = 0.0
-        self._ep_start     = 0.0
-        self._state        = 'WAITING'
-        self._tank_spawned = False   # True only while a tank entity exists in Gazebo
-        self._gz_ready     = False   # True once Gazebo world services are registered
+        # Interceptor (autonomous) state.
+        self._int_x = self._int_y = self._int_z = 0.0
+        self._int_yaw = 0.0
+        self._int_have = False
+        self._int_status = ''
+
+        self._tank_x = self._tank_y = 0.0
+        self._tank_spawned = False
+
+        self._episode = 0
+        self._state = 'WAITING'        # WAITING | ACTIVE | KAMIKAZE_WIN | DEFENSE_WIN
+        self._ep_start = 0.0
+        self._kam_score = 0            # tanks destroyed (you)
+        self._def_score = 0            # kamikazes intercepted (defense)
+        self._gz_ready = False
 
         self._bridge  = CvBridge()
         self._map_pub = self.create_publisher(Image, '/game/minimap', 10)
 
-        self.create_subscription(Odometry, '/model/x3/odometry', self._on_odom, 10)
+        latched = QoSProfile(depth=1,
+                             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=QoSReliabilityPolicy.RELIABLE)
+        self._reset_pub = self.create_publisher(Empty, '/game/reset', latched)
+
+        self.create_subscription(Odometry, '/model/x3/odometry', self._on_kam_odom, 10)
+        self.create_subscription(Odometry, '/interceptor/odometry', self._on_int_odom, 10)
+        self.create_subscription(String, '/interceptor/status', self._on_int_status, 10)
         self.create_timer(0.1, self._tick)
 
-        # Poll gz services in the background so we don't spawn before Gazebo is ready
+        self._init_metrics()
         threading.Thread(target=self._wait_for_gazebo, daemon=True).start()
-        print('[GAME] Kamikaze Drone Hunt — waiting for Gazebo world...')
+        print('[GAME] Drone Defense Duel — waiting for Gazebo world...')
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
-
-    def destroy_node(self):
-        super().destroy_node()
-
     def _wait_for_gazebo(self):
-        """Background thread: poll gz service --list until the world is ready."""
         create_svc = f'/world/{WORLD}/create'
         while not self._gz_ready:
             try:
-                result = subprocess.run(
-                    ['gz', 'service', '--list'],
-                    capture_output=True, text=True, timeout=5,
-                )
+                result = subprocess.run(['gz', 'service', '--list'],
+                                        capture_output=True, text=True, timeout=5)
                 if create_svc in result.stdout:
-                    time.sleep(1.0)   # 1 extra second so all services settle
+                    time.sleep(1.0)
                     self._gz_ready = True
                     print('[GAME] Gazebo ready — episode 1 starting...')
                     return
@@ -220,140 +225,193 @@ class GameManager(Node):
                 pass
             time.sleep(1.0)
 
-    # ── Subscriptions ──────────────────────────────────────────────────────
-
-    def _on_odom(self, msg):
+    # ── Subscriptions ────────────────────────────────────────────────────────
+    def _on_kam_odom(self, msg):
         p = msg.pose.pose.position
-        self._drone_x, self._drone_y, self._drone_z = p.x, p.y, p.z
-        q = msg.pose.pose.orientation
-        # Yaw from quaternion — 0 = facing North (+X world axis)
-        self._drone_yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-        )
+        self._kam_x, self._kam_y, self._kam_z = p.x, p.y, p.z
+        self._kam_yaw = _yaw_from_quat(msg.pose.pose.orientation)
+        self._kam_have = True
 
-    # ── Gazebo service helpers ─────────────────────────────────────────────
+    def _on_int_odom(self, msg):
+        p = msg.pose.pose.position
+        self._int_x, self._int_y, self._int_z = p.x, p.y, p.z
+        self._int_yaw = _yaw_from_quat(msg.pose.pose.orientation)
+        self._int_have = True
 
+    def _on_int_status(self, msg):
+        self._int_status = msg.data
+
+    # ── Gazebo service helpers ───────────────────────────────────────────────
     def _gz_spawn(self, sdf_inline: str, x: float, y: float, z: float = 0.0):
-        # Pass SDF inline (single-quoted XML → no proto-text escaping needed).
-        # subprocess list args bypass the shell, so single quotes in the SDF
-        # are passed verbatim to gz without any shell interpretation.
         req = (f'sdf: "{sdf_inline}" '
                f'pose: {{position: {{x: {x:.2f} y: {y:.2f} z: {z:.2f}}}}}')
         subprocess.Popen(
             ['gz', 'service', '-s', f'/world/{WORLD}/create',
-             '--reqtype', 'gz.msgs.EntityFactory',
-             '--reptype', 'gz.msgs.Boolean',
+             '--reqtype', 'gz.msgs.EntityFactory', '--reptype', 'gz.msgs.Boolean',
              '--timeout', '5000', '--req', req],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _gz_remove(self, name: str):
-        # type: 2 = MODEL in gz.msgs.Entity EntityType enum
         subprocess.Popen(
             ['gz', 'service', '-s', f'/world/{WORLD}/remove',
-             '--reqtype', 'gz.msgs.Entity',
-             '--reptype', 'gz.msgs.Boolean',
-             '--timeout', '5000',
-             '--req', f'name: "{name}" type: 2'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+             '--reqtype', 'gz.msgs.Entity', '--reptype', 'gz.msgs.Boolean',
+             '--timeout', '5000', '--req', f'name: "{name}" type: 2'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _gz_set_pose(self, model: str, x: float, y: float, z: float):
         req = f'name: "{model}" position: {{x: {x:.2f} y: {y:.2f} z: {z:.2f}}}'
         subprocess.Popen(
             ['gz', 'service', '-s', f'/world/{WORLD}/set_pose',
-             '--reqtype', 'gz.msgs.Pose',
-             '--reptype', 'gz.msgs.Boolean',
+             '--reqtype', 'gz.msgs.Pose', '--reptype', 'gz.msgs.Boolean',
              '--timeout', '5000', '--req', req],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # ── Episode management ─────────────────────────────────────────────────
-
-    def _random_pos(self):
+    def _tank_pos(self):
         while True:
-            x = random.uniform(-SPAWN_MAX, SPAWN_MAX)
-            y = random.uniform(-SPAWN_MAX, SPAWN_MAX)
-            if math.hypot(x, y) >= SPAWN_MIN:
+            x = random.uniform(-TANK_BASE_R, TANK_BASE_R)
+            y = random.uniform(-TANK_BASE_R, TANK_BASE_R)
+            if math.hypot(x, y) <= TANK_BASE_R:
                 return x, y
+
+    def _kam_spawn(self):
+        bearing = random.uniform(0, 2 * math.pi)
+        dist = random.uniform(KAM_SPAWN_MIN_R, KAM_SPAWN_MAX_R)
+        z = random.uniform(KAM_SPAWN_MIN_Z, KAM_SPAWN_MAX_Z)
+        return dist * math.cos(bearing), dist * math.sin(bearing), z
 
     def _start_episode(self):
         self._episode += 1
-        self._tank_x, self._tank_y = self._random_pos()
-        # Only remove if a tank is actually alive in Gazebo — avoids "not found" errors
+        # Tank (asset) at the base.
+        self._tank_x, self._tank_y = self._tank_pos()
         if self._tank_spawned:
             self._gz_remove('target_tank')
             self._tank_spawned = False
             time.sleep(0.3)
         self._gz_spawn(_TANK_SDF, self._tank_x, self._tank_y)
         self._tank_spawned = True
-        self._ep_start = time.monotonic()
-        self._state = 'HUNTING'
 
-        dist    = math.hypot(self._tank_x, self._tank_y)
-        bearing = _compass(self._tank_x, self._tank_y)
-        print(f'\n[EPISODE {self._episode}]  Tank ~{dist:.0f} m {bearing}')
-        print('Take off with T, find the tank, dive into it!')
+        # Reposition the kamikaze (X3) as an incoming attacker.
+        kx, ky, kz = self._kam_spawn()
+        self._gz_set_pose('x3', kx, ky, kz)
+
+        # Tell the interceptor to (re)spawn and re-aim.
+        self._reset_pub.publish(Empty())
+
+        self._ep_start = time.monotonic()
+        self._state = 'ACTIVE'
+        dist = math.hypot(self._tank_x, self._tank_y)
+        print(f'\n[EPISODE {self._episode}]  Tank at base; you spawn ~'
+              f'{math.hypot(kx, ky):.0f} m out, {kz:.0f} m alt {_compass(kx, ky)}.')
+        print('Dive into the tank before the interceptor catches you!')
 
     # ── Main tick (10 Hz) ─────────────────────────────────────────────────
-
     def _tick(self):
         if self._state == 'WAITING':
             if self._gz_ready:
                 self._start_episode()
-            self._publish_map(dist=0.0, elapsed=0.0)
+            self._publish_map()
             return
 
-        if self._state == 'HIT':
-            self._publish_map(dist=0.0, elapsed=time.monotonic() - self._ep_start)
+        if self._state in ('KAMIKAZE_WIN', 'DEFENSE_WIN'):
+            self._publish_map()
             return
 
-        dist    = math.sqrt(
-            (self._drone_x - self._tank_x) ** 2 +
-            (self._drone_y - self._tank_y) ** 2 +
-            (self._drone_z - 1.0) ** 2
-        )
+        # ── ACTIVE: referee ────────────────────────────────────────────────
         elapsed = time.monotonic() - self._ep_start
+        if self._kam_have:
+            d_tank = math.sqrt((self._kam_x - self._tank_x) ** 2 +
+                               (self._kam_y - self._tank_y) ** 2 +
+                               (self._kam_z - 1.0) ** 2)
+        else:
+            d_tank = 1e9
+        if self._kam_have and self._int_have:
+            d_int = math.sqrt((self._kam_x - self._int_x) ** 2 +
+                              (self._kam_y - self._int_y) ** 2 +
+                              (self._kam_z - self._int_z) ** 2)
+        else:
+            d_int = 1e9
 
         sys.stdout.write(
             f'\r  [Ep {self._episode}] {int(elapsed)//60:02d}:{int(elapsed)%60:02d}'
-            f' | Dist: {dist:5.1f} m | {_heat(dist):<16}'
+            f' | tank {d_tank:5.1f} m | interceptor {d_int:5.1f} m   '
         )
         sys.stdout.flush()
+        self._publish_map(d_tank=d_tank, d_int=d_int, elapsed=elapsed)
 
-        self._publish_map(dist=dist, elapsed=elapsed)
+        if d_int < INTERCEPT_DIST:
+            self._end_episode('DEFENSE_WIN', elapsed, d_int, d_tank)
+        elif d_tank < TANK_HIT_DIST:
+            self._end_episode('KAMIKAZE_WIN', elapsed, d_int, d_tank)
+        elif elapsed > EPISODE_TIMEOUT:
+            self._end_episode('TIMEOUT', elapsed, d_int, d_tank)
 
-        if dist < HIT_DISTANCE:
-            self._state = 'HIT'
-            threading.Thread(
-                target=self._explosion_sequence,
-                args=(elapsed,),
-                daemon=True,
-            ).start()
+    def _end_episode(self, outcome, elapsed, d_int, d_tank):
+        self._state = outcome if outcome != 'TIMEOUT' else 'KAMIKAZE_WIN'  # draw map state
+        self._log_metric(outcome, elapsed, d_int, d_tank)
+        threading.Thread(target=self._resolve, args=(outcome, elapsed), daemon=True).start()
 
-    # ── Map image ─────────────────────────────────────────────────────────
+    def _resolve(self, outcome, elapsed):
+        if outcome == 'DEFENSE_WIN':
+            self._def_score += 1
+            ex, ey, ez = self._kam_x, self._kam_y, self._kam_z   # kamikaze blown up
+            print(f'\n[DEFENSE WIN] Interceptor splashed the kamikaze at '
+                  f'{elapsed:04.1f}s.  Defense {self._def_score} : {self._kam_score} You')
+        elif outcome == 'KAMIKAZE_WIN':
+            self._kam_score += 1
+            ex, ey, ez = self._tank_x, self._tank_y, 1.5         # tank blown up
+            print(f'\n[KAMIKAZE WIN] Tank destroyed at {elapsed:04.1f}s!  '
+                  f'You {self._kam_score} : {self._def_score} Defense')
+        else:  # TIMEOUT
+            ex = ey = ez = None
+            print(f'\n[TIMEOUT] Stalemate at {elapsed:04.1f}s.')
 
-    def _publish_map(self, dist: float, elapsed: float):
-        img = self._build_map_image(dist, elapsed)
+        if ex is not None:
+            self._gz_spawn(_FIREBALL_SDF, ex, ey, ez)
+            time.sleep(FIREBALL_SECS)
+            self._gz_remove('explosion_fireball')
+            self._gz_spawn(_SMOKE_SDF, ex, ey, ez)
+            time.sleep(SMOKE_SECS)
+            self._gz_remove('explosion_smoke')
+
+        self._start_episode()
+
+    # ── Metrics ────────────────────────────────────────────────────────────
+    def _init_metrics(self):
+        self._metrics_path = os.path.abspath(METRICS_CSV)
+        if not os.path.exists(self._metrics_path):
+            with open(self._metrics_path, 'w', newline='') as f:
+                csv.writer(f).writerow(
+                    ['episode', 'outcome', 'duration_s',
+                     'interceptor_kamikaze_range_m', 'kamikaze_tank_range_m',
+                     'interceptor_status'])
+        print(f'[GAME] metrics → {self._metrics_path}')
+
+    def _log_metric(self, outcome, elapsed, d_int, d_tank):
+        with open(self._metrics_path, 'a', newline='') as f:
+            csv.writer(f).writerow(
+                [self._episode, outcome, f'{elapsed:.2f}',
+                 f'{d_int:.2f}', f'{d_tank:.2f}', self._int_status])
+
+    # ── Minimap ──────────────────────────────────────────────────────────
+    def _publish_map(self, d_tank=0.0, d_int=0.0, elapsed=0.0):
+        img = self._build_map_image(d_tank, d_int, elapsed)
         msg = self._bridge.cv2_to_imgmsg(img, encoding='bgr8')
         msg.header.stamp = self.get_clock().now().to_msg()
         self._map_pub.publish(msg)
 
-    def _build_map_image(self, dist: float, elapsed: float) -> np.ndarray:
+    def _build_map_image(self, d_tank, d_int, elapsed) -> np.ndarray:
         S = MAP_PX
-        # ── Light map background so ALL features have contrast ────────────
-        img = np.full((S, S, 3), (110, 170, 75), dtype=np.uint8)  # bright grass
+        img = np.full((S, S, 3), (110, 170, 75), dtype=np.uint8)
 
         def wpx(wx, wy):
-            """World (North=+X, West=+Y) → (col, row) clamped pixel."""
             h = S / 2.0
             return (int(max(0, min(S - 1, h + (-wy / MAP_RANGE) * h))),
                     int(max(0, min(S - 1, h + (-wx / MAP_RANGE) * h))))
 
         def rect(wx, wy, hx, hy, fill, border=None, bt=2):
-            c0, r0 = wpx(wx + hx, wy + hy)   # NW corner (max North, max West)
-            c1, r1 = wpx(wx - hx, wy - hy)   # SE corner
+            c0, r0 = wpx(wx + hx, wy + hy)
+            c1, r1 = wpx(wx - hx, wy - hy)
             cmin, cmax = min(c0, c1), max(c0, c1)
             rmin, rmax = min(r0, r1), max(r0, r1)
             if cmax <= cmin: cmax = cmin + 1
@@ -364,195 +422,109 @@ class GameManager(Node):
 
         font = cv2.FONT_HERSHEY_SIMPLEX
 
-        # ── Roads ─────────────────────────────────────────────────────────
+        # Roads
         for wx, wy, hx, hy, _ in _WORLD_ROADS:
-            rect(wx, wy, hx, hy, (128, 125, 115))          # asphalt
-        # Yellow centre-line stripes on both roads
-        ns0, _ = wpx(100, 0);  ns1, _ = wpx(-100, 0)
-        oc, or_ = wpx(0, 0)
-        ew0 = wpx(0, -100)[0]; ew1 = wpx(0, 100)[0]
-        cv2.line(img, (oc, ns0[1] if False else or_ - (or_ - wpx(100,0)[1])),
-                 (oc, or_ + (wpx(-100,0)[1] - or_)), (60, 215, 220), 1)
-        # simpler: just draw the two centre lines
-        cv2.line(img, wpx( 100, 0), wpx(-100,  0), (60, 215, 220), 1)  # N-S
-        cv2.line(img, wpx(0, -100), wpx(  0, 100), (60, 215, 220), 1)  # E-W
+            rect(wx, wy, hx, hy, (128, 125, 115))
+        cv2.line(img, wpx(100, 0), wpx(-100, 0), (60, 215, 220), 1)
+        cv2.line(img, wpx(0, -100), wpx(0, 100), (60, 215, 220), 1)
 
-        # ── Trees ─────────────────────────────────────────────────────────
+        # Trees
         for tx, ty, cr in _WORLD_TREES:
             pc, pr = wpx(tx, ty)
-            # World scale + generous minimum so they're always clearly visible
-            r_px = max(14, int(cr / MAP_RANGE * (S // 2)))
-            # Shadow
-            cv2.circle(img, (pc + 3, pr + 3), r_px, (55, 90, 30), -1)
-            # Crown (bright lime green — very different from ground)
+            r_px = max(7, int(cr / MAP_RANGE * (S // 2)))
             cv2.circle(img, (pc, pr), r_px, (30, 200, 30), -1)
-            # Dark green outline so crown pops against lighter ground
-            cv2.circle(img, (pc, pr), r_px, (0, 100, 0), 2)
-            # Darker centre (trunk visible from above)
-            cv2.circle(img, (pc, pr), max(3, r_px // 4), (25, 60, 20), -1)
+            cv2.circle(img, (pc, pr), r_px, (0, 100, 0), 1)
 
-        # ── Buildings ─────────────────────────────────────────────────────
-        # Warm beige/stone colours — clearly different from the green ground
+        # Buildings
         _BLDG_COLORS = [
-            (195, 200, 215),  # office_a   — light cool-grey
-            (185, 195, 210),  # office_b
-            (220, 225, 235),  # tower      — almost white (glass/concrete)
-            (160, 155, 145),  # warehouse  — warm brown-grey
-            (200, 205, 220),  # apartment
-            (210, 195, 180),  # shop_a     — warm sandstone
-            (205, 190, 175),  # shop_b
-            (135, 130, 125),  # factory    — dark industrial
+            (195, 200, 215), (185, 195, 210), (220, 225, 235), (160, 155, 145),
+            (200, 205, 220), (210, 195, 180), (205, 190, 175), (135, 130, 125),
         ]
         for (wx, wy, hx, hy, _), fill in zip(_WORLD_BUILDINGS, _BLDG_COLORS):
             dark = tuple(max(0, c - 65) for c in fill)
-            rect(wx, wy, hx, hy, fill, dark, bt=2)
-            # Tiny roof-line cross so buildings don't look flat
-            bc, br = wpx(wx, wy)
-            cv2.line(img, (bc - 3, br), (bc + 3, br), dark, 1)
-            cv2.line(img, (bc, br - 3), (bc, br + 3), dark, 1)
-
-        # Chimney: dark cylinder viewed from above
+            rect(wx, wy, hx, hy, fill, dark, bt=1)
         cc, cr = wpx(_CHIMNEY[0], _CHIMNEY[1])
-        cv2.circle(img, (cc, cr), 6, (70, 65, 60), -1)
-        cv2.circle(img, (cc, cr), 6, (40, 38, 35), 2)
+        cv2.circle(img, (cc, cr), 4, (70, 65, 60), -1)
 
-        # ── Spawn-origin marker ───────────────────────────────────────────
+        # Origin marker
         oc, or_ = wpx(0, 0)
-        cv2.line(img, (oc - 10, or_), (oc + 10, or_), (255, 255, 255), 1)
-        cv2.line(img, (oc, or_ - 10), (oc, or_ + 10), (255, 255, 255), 1)
-        cv2.circle(img, (oc, or_), 4, (255, 255, 255), 1)
+        cv2.line(img, (oc - 8, or_), (oc + 8, or_), (255, 255, 255), 1)
+        cv2.line(img, (oc, or_ - 8), (oc, or_ + 8), (255, 255, 255), 1)
 
-        # ── Dotted line from drone to tank while hunting ──────────────────
-        if self._state == 'HUNTING':
-            dc_pre, dr_pre = wpx(self._drone_x, self._drone_y)
-            tc_pre, tr_pre = wpx(self._tank_x,  self._tank_y)
-            # draw dashes
-            steps = 18
-            for i in range(steps):
-                if i % 2 == 0:
-                    t0 = i / steps;       t1 = (i + 0.5) / steps
-                    p0 = (int(dc_pre + t0 * (tc_pre - dc_pre)),
-                          int(dr_pre + t0 * (tr_pre - dr_pre)))
-                    p1 = (int(dc_pre + t1 * (tc_pre - dc_pre)),
-                          int(dr_pre + t1 * (tr_pre - dr_pre)))
-                    cv2.line(img, p0, p1, (0, 0, 220), 1)
+        # LOS line interceptor → kamikaze (the chase)
+        if self._state == 'ACTIVE' and self._kam_have and self._int_have:
+            kc, kr = wpx(self._kam_x, self._kam_y)
+            ic, ir = wpx(self._int_x, self._int_y)
+            steps = 20
+            for i in range(0, steps, 2):
+                t0, t1 = i / steps, (i + 0.6) / steps
+                p0 = (int(ic + t0 * (kc - ic)), int(ir + t0 * (kr - ir)))
+                p1 = (int(ic + t1 * (kc - ic)), int(ir + t1 * (kr - ir)))
+                cv2.line(img, p0, p1, (40, 120, 255), 2)
 
-        # ── Tank ──────────────────────────────────────────────────────────
-        if self._state in ('HUNTING', 'HIT'):
+        # Tank (asset)
+        if self._tank_spawned or self._state != 'WAITING':
             tc, tr = wpx(self._tank_x, self._tank_y)
-            if self._state == 'HIT':
-                # Animated-style explosion rings
-                for r, c in [(38, (20, 40, 200)), (26, (40, 110, 240)),
-                              (16, (100, 200, 255))]:
+            if self._state == 'KAMIKAZE_WIN':
+                for r, c in [(34, (20, 40, 200)), (22, (40, 110, 240)), (13, (100, 200, 255))]:
                     cv2.circle(img, (tc, tr), r, c, -1)
-                cv2.putText(img, 'BOOM!', (tc - 30, tr - 44),
-                            font, 0.75, (0, 230, 255), 2)
+                cv2.putText(img, 'BOOM!', (tc - 28, tr - 38), font, 0.7, (0, 230, 255), 2)
             else:
-                # Fixed display size (30×18 px) so it's always readable
-                HW, HH = 30, 10   # half-width, half-height in pixels
-                cv2.rectangle(img, (tc - HW, tr - HH), (tc + HW, tr + HH),
-                              (20, 60, 10), -1)                   # dark olive hull
-                cv2.rectangle(img, (tc - HW, tr - HH), (tc + HW, tr + HH),
-                              (60, 230, 60), 3)                   # bright green border
-                # Turret
-                cv2.circle(img, (tc, tr), 9, (15, 90, 15), -1)
-                cv2.circle(img, (tc, tr), 9, (60, 230, 60), 2)
-                # Barrel — always points North (+X = up in image)
-                bc, br = wpx(self._tank_x + 14, self._tank_y)
-                cv2.line(img, (tc, tr), (bc, br), (80, 255, 80), 3)
-                # Label above
-                cv2.putText(img, 'TANK', (tc - 22, tr - HH - 7),
-                            font, 0.55, (60, 255, 60), 2)
+                HW, HH = 16, 7
+                cv2.rectangle(img, (tc - HW, tr - HH), (tc + HW, tr + HH), (20, 60, 10), -1)
+                cv2.rectangle(img, (tc - HW, tr - HH), (tc + HW, tr + HH), (60, 230, 60), 2)
+                cv2.circle(img, (tc, tr), 6, (15, 90, 15), -1)
+                cv2.putText(img, 'TANK', (tc - 18, tr - HH - 5), font, 0.45, (60, 255, 60), 1)
 
-        # ── Drone — large arrow triangle pointing in heading direction ─────
-        dc, dr = wpx(self._drone_x, self._drone_y)
-        yaw = self._drone_yaw
-        hc = -math.sin(yaw)   # heading col component (North=up → sin inverted)
-        hr = -math.cos(yaw)   # heading row component
-        rc =  hr               # right-perp col
-        rr = -hc               # right-perp row
-        L, W, B = 24, 13, 10  # nose length, wing half-width, tail setback (px)
-        nose  = (int(dc + L * hc),          int(dr + L * hr))
-        lwing = (int(dc - W * rc - B * hc), int(dr - W * rr - B * hr))
-        rwing = (int(dc + W * rc - B * hc), int(dr + W * rr - B * hr))
-        pts = np.array([nose, lwing, rwing], dtype=np.int32)
-        # Draw thick black shadow/border first, then bright fill on top
-        cv2.fillPoly(img, [pts], (0, 0, 0))
-        # Expand pts outward by 3 px for fat border effect: just use polylines
-        cv2.polylines(img, [pts.reshape(-1, 1, 2)], True, (0, 0, 0), 5)
-        cv2.fillPoly(img, [pts], (0, 245, 255))              # bright yellow-cyan
-        cv2.polylines(img, [pts.reshape(-1, 1, 2)], True, (0, 0, 0), 2)
-        cv2.circle(img, (dc, dr), 4, (0, 0, 0), -1)          # pivot dot
-        cv2.putText(img, 'YOU', (dc + 28, dr + 6),
-                    font, 0.55, (0, 245, 255), 2)
+        # Kamikaze (you) + interceptor as heading arrows
+        self._draw_aircraft(img, wpx, self._kam_x, self._kam_y, self._kam_yaw,
+                            (0, 245, 255), 'YOU', self._kam_have,
+                            blown=(self._state == 'DEFENSE_WIN'))
+        self._draw_aircraft(img, wpx, self._int_x, self._int_y, self._int_yaw,
+                            (60, 90, 255), 'INTERCEPTOR', self._int_have, blown=False)
 
-        # ── Compass labels (black shadow + white) ─────────────────────────
-        for txt, pos in [('N', (S//2 - 8,  46)), ('S', (S//2 - 8, S - 8)),
-                         ('W', (6, S//2 + 8)),    ('E', (S - 26, S//2 + 8))]:
-            cv2.putText(img, txt, (pos[0] + 1, pos[1] + 1), font, 0.7, (0,   0,  0), 2)
-            cv2.putText(img, txt, pos,                       font, 0.7, (255,255,255), 2)
+        # Compass
+        for txt, pos in [('N', (S//2 - 8, 42)), ('S', (S//2 - 8, S - 8)),
+                         ('W', (6, S//2 + 8)), ('E', (S - 26, S//2 + 8))]:
+            cv2.putText(img, txt, (pos[0] + 1, pos[1] + 1), font, 0.7, (0, 0, 0), 2)
+            cv2.putText(img, txt, pos, font, 0.7, (255, 255, 255), 2)
 
-        # ── Mini legend (bottom-left corner) ─────────────────────────────
-        lx, ly = 6, S - 60
-        cv2.rectangle(img, (lx - 2, ly - 14), (lx + 110, ly + 46), (20,20,20), -1)
-        cv2.rectangle(img, (lx - 2, ly - 14), (lx + 110, ly + 46), (80,80,80), 1)
-        # tree swatch
-        cv2.circle(img, (lx + 7, ly), 7, (30, 200, 30), -1)
-        cv2.putText(img, 'Tree', (lx + 18, ly + 5), font, 0.4, (200, 200, 200), 1)
-        # building swatch
-        cv2.rectangle(img, (lx + 3, ly + 18), (lx + 14, ly + 30), (195, 200, 215), -1)
-        cv2.putText(img, 'Building', (lx + 18, ly + 30), font, 0.4, (200,200,200), 1)
-
-        # ── HUD bar ───────────────────────────────────────────────────────
-        cv2.rectangle(img, (0, 0), (S, 32), (20, 20, 20), -1)
-        m, s  = divmod(int(elapsed), 60)
-        kills = len(self._scores)
-        status = _heat(dist).strip() if self._state == 'HUNTING' else self._state
-        hud = (f'Ep {self._episode}  {m:02d}:{s:02d}'
-               f'  Dist:{dist:5.1f}m  {status}  Kills:{kills}')
-        cv2.putText(img, hud, (6, 22), font, 0.52, (220, 220, 220), 1)
+        # HUD
+        cv2.rectangle(img, (0, 0), (S, 34), (20, 20, 20), -1)
+        m, s = divmod(int(elapsed), 60)
+        status = {'ACTIVE': 'ENGAGED', 'KAMIKAZE_WIN': 'TANK DESTROYED',
+                  'DEFENSE_WIN': 'KAMIKAZE SPLASHED', 'WAITING': 'STANDBY'}.get(
+                      self._state, self._state)
+        hud = (f'Ep {self._episode}  {m:02d}:{s:02d}  You {self._kam_score}'
+               f' : {self._def_score} Def   tank:{d_tank:5.1f}m  intc:{d_int:5.1f}m'
+               f'   {status}')
+        cv2.putText(img, hud, (6, 23), font, 0.5, (220, 220, 220), 1)
         cv2.rectangle(img, (0, 0), (S - 1, S - 1), (160, 160, 160), 2)
         return img
 
-    # ── Explosion sequence (background thread) ────────────────────────────
+    def _draw_aircraft(self, img, wpx, wx, wy, yaw, color, label, have, blown):
+        if not have:
+            return
+        dc, dr = wpx(wx, wy)
+        if blown:
+            for r, c in [(20, (20, 40, 200)), (12, (60, 140, 240))]:
+                cv2.circle(img, (dc, dr), r, c, -1)
+            cv2.putText(img, 'SPLASH', (dc - 28, dr - 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 2)
+            return
+        hc, hr = -math.sin(yaw), -math.cos(yaw)
+        rc, rr = hr, -hc
+        L, W, B = 18, 10, 8
+        nose  = (int(dc + L * hc), int(dr + L * hr))
+        lwing = (int(dc - W * rc - B * hc), int(dr - W * rr - B * hr))
+        rwing = (int(dc + W * rc - B * hc), int(dr + W * rr - B * hr))
+        pts = np.array([nose, lwing, rwing], dtype=np.int32)
+        cv2.fillPoly(img, [pts], (0, 0, 0))
+        cv2.polylines(img, [pts.reshape(-1, 1, 2)], True, (0, 0, 0), 4)
+        cv2.fillPoly(img, [pts], color)
+        cv2.putText(img, label, (dc + 14, dr + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-    def _explosion_sequence(self, elapsed: float):
-        tx, ty = self._tank_x, self._tank_y
-        self._scores.append(elapsed)
-
-        m, s  = divmod(int(elapsed), 60)
-        kills = len(self._scores)
-        times = '  '.join(f'{int(t)//60:02d}:{int(t)%60:02d}' for t in self._scores)
-
-        self._gz_spawn(_FIREBALL_SDF, tx, ty, 1.5)
-
-        print('\n')
-        print(r'  ██████╗  ██████╗  ██████╗ ███╗   ███╗ ██╗')
-        print(r'  ██╔══██╗██╔═══██╗██╔═══██╗████╗ ████║ ██║')
-        print(r'  ██████╔╝██║   ██║██║   ██║██╔████╔██║ ██║')
-        print(r'  ██╔══██╗██║   ██║██║   ██║██║╚██╔╝██║ ╚═╝')
-        print(r'  ██████╔╝╚██████╔╝╚██████╔╝██║ ╚═╝ ██║ ██╗')
-        print(r'  ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝     ╚═╝ ╚═╝')
-        print(f'\n  TANK DESTROYED!  Episode {self._episode}  —  {m:02d}:{s:02d}')
-        print(f'  Kills: {kills}   Times: {times}')
-
-        time.sleep(FIREBALL_SECS)
-
-        self._gz_remove('explosion_fireball')
-        self._gz_spawn(_SMOKE_SDF, tx, ty, 1.5)
-        self._gz_remove('target_tank')
-        self._tank_spawned = False
-
-        time.sleep(SMOKE_SECS)
-        self._gz_remove('explosion_smoke')
-
-        self._gz_set_pose('x3', 0.0, 0.0, 0.30)
-        time.sleep(0.8)
-
-        self._start_episode()
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     rclpy.init()

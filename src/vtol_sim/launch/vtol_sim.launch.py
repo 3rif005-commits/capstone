@@ -49,6 +49,26 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Service bridge: the interceptor node drives its model pose at 50 Hz via
+    # the bridged /world/vtol_world/set_pose service (see config yaml).
+    service_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='gz_service_bridge',
+        parameters=[{'config_file': os.path.join(pkg, 'config',
+                                                  'gz_bridge_services.yaml')}],
+        output='screen',
+    )
+
+    # Autonomous fixed-wing interceptor (classical guidance, no RL).
+    interceptor = Node(
+        package='vtol_sim',
+        executable='interceptor_node',
+        name='interceptor_node',
+        parameters=[{'guidance_law': 'apn', 'nav_constant': 4.0}],
+        output='screen',
+    )
+
     # Camera image bridge (Gazebo → ROS2 sensor_msgs/Image)
     camera_bridge = Node(
         package='ros_gz_image',
@@ -76,6 +96,8 @@ def generate_launch_description():
     return LaunchDescription([
         gz_sim,
         bridge,
+        service_bridge,
+        interceptor,
         camera_bridge,
         rqt_image_view,
         rqt_minimap,

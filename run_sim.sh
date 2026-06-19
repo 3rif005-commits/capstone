@@ -24,7 +24,7 @@ source install/setup.bash
 
 echo ""
 echo "========================================================"
-echo "  VTOL Kamikaze Drone Hunt"
+echo "  Drone Defense Duel (v2) — kamikaze vs. fixed-wing interceptor"
 echo "========================================================"
 echo "  Terminal 2 (game manager):"
 echo "    ros2 run vtol_sim game_manager"

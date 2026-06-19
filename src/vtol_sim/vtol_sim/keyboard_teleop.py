@@ -24,10 +24,11 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 
-LINEAR_SPEED  = 3.0   # m/s
-ANGULAR_SPEED = 0.7   # rad/s  (gentle yaw -> small thrust disturbance, so
-                      # little altitude dip / sideways drift, and little heading
-                      # overshoot when released)
+# v2 "kamikaze tuned for the chase": faster, snappier than v1 (was 3.0 m/s,
+# 0.7 rad/s) so the player is a credible, evasive target for the 26 m/s
+# interceptor. The offline study uses 10–16 m/s targets; tune in-sim to taste.
+LINEAR_SPEED  = 9.0   # m/s
+ANGULAR_SPEED = 1.3   # rad/s  (snappier yaw for evasive jinking)
 PUBLISH_RATE     = 20    # Hz
 KEY_HOLD_TIMEOUT = 0.10  # seconds a key stays active after last repeat
                          # (lower = crisper stop on release; must stay above the

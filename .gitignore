@@ -7,3 +7,6 @@ log/
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# v2 game metrics (regenerated each run)
+v2_metrics.csv

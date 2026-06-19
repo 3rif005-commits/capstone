@@ -1,7 +1,15 @@
-# VTOL Kamikaze Drone Hunt — How to Run
+# Drone Defense Duel (v2) — How to Run
 
-ROS 2 **Jazzy** + Gazebo **Harmonic** (gz-sim 8). X3 quadcopter kamikaze game:
-find the randomly-spawned tank and dive into it!
+ROS 2 **Jazzy** + Gazebo **Harmonic** (gz-sim 8).
+
+**The duel:** YOU pilot the X3 multirotor as a **kamikaze**, diving it into the
+**tank**. An autonomous fixed-wing **interceptor** (classical guidance — Pure
+Pursuit / PN / Augmented PN, *no RL*) spawns in the sky and tries to reach you
+first to defend the tank.
+
+> v1 (the original solo X3 kamikaze-hunt game) is preserved at git branch
+> `v1-vtol-quadcopter` / tag `v1.0-quadcopter-game`. `git checkout v1-vtol-quadcopter`
+> to return to it.
 
 ---
 
@@ -17,7 +25,7 @@ colcon build --packages-select vtol_sim
 
 ## 2. Run — three terminals
 
-Open **three terminals**. In **each one** run:
+In **each terminal**:
 
 ```bash
 cd ~/projects/capstone
@@ -25,37 +33,43 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
-### Terminal 1 — Gazebo + bridges + map/camera windows
+### Terminal 1 — Gazebo + bridges + interceptor + windows
 
 ```bash
 ros2 launch vtol_sim vtol_sim.launch.py
 ```
 
-This opens:
-- Gazebo 3-D world
-- Camera feed window (drone nose camera)
-- Mini-map window (bird's-eye tactical map)
+Opens the Gazebo world, the ROS↔Gz topic/service bridges, the **autonomous
+interceptor node**, the nose-camera window, and the tactical mini-map window.
 
-### Terminal 2 — Game manager (episodes, tank, hit detection)
+To pick the interceptor's guidance law (default `apn`):
+
+```bash
+ros2 launch vtol_sim vtol_sim.launch.py
+# or run the node standalone with a different law:
+ros2 run vtol_sim interceptor_node --ros-args -p guidance_law:=pn -p nav_constant:=4.0
+#   guidance_law: apn | pn | pure_pursuit
+```
+
+### Terminal 2 — Game manager (referee, episodes, scoring)
 
 ```bash
 ros2 run vtol_sim game_manager
 ```
 
-Spawns the tank, detects kamikaze hits, triggers explosions, and drives the
-map image. Keep this terminal visible — it prints episode info and distance.
+Spawns the tank, repositions you as an incoming attacker each episode, decides
+the outcome (you reach the tank vs. interceptor reaches you), drives the
+mini-map, and logs metrics to `v2_metrics.csv`.
 
-### Terminal 3 — Keyboard control
+### Terminal 3 — Your kamikaze controls
 
 ```bash
 ros2 run vtol_sim keyboard_teleop
 ```
 
-Needs an interactive terminal (reads keypresses). Controls:
-
 | Key | Action |
 |-----|--------|
-| `T` | Auto-takeoff to ~5 m |
+| `T` | Auto-takeoff / climb |
 | `Z` / `S` | Throttle up / down |
 | `Q` / `D` | Yaw left / right |
 | Arrow ↑ / ↓ | Pitch forward / backward |
@@ -63,55 +77,44 @@ Needs an interactive terminal (reads keypresses). Controls:
 | Space | Hover (stop all motion) |
 | Esc / Ctrl-C | Quit |
 
+You start airborne and far out — fly toward the tank and dive in before the
+interceptor catches you. The mini-map shows **YOU** (cyan), the **INTERCEPTOR**
+(blue), the **TANK** (green), and a dashed line = the interceptor's lock on you.
+
 ---
 
-## 3. Quick-start shortcut (Terminal 1 only)
+## 3. Offline guidance study (no Gazebo)
 
-`run_sim.sh` handles the build + sourcing + launch in one shot:
+Compare the guidance laws headlessly (success / intercept time / miss distance /
+control effort / crash rate) — this is the algorithm-development workbench:
 
 ```bash
-cd ~/projects/capstone
-./run_sim.sh          # launch only (uses existing build)
-./run_sim.sh --build  # force rebuild first
+ros2 run vtol_sim engagement_sim
+# or:  python3 -m vtol_sim.interception.engagement_sim   (from src/vtol_sim)
 ```
 
-You still need Terminals 2 and 3 started manually.
-
 ---
 
-## 4. How to play
-
-1. Launch all three terminals in order (1 → 2 → 3).
-2. Press **T** in Terminal 3 to take off.
-3. Read the distance and heat indicator in Terminal 2 to locate the tank.
-   The **mini-map window** shows the tank (green rectangle + "TANK" label)
-   and your drone (cyan arrow pointing in your heading direction).
-4. Fly toward the tank and **dive into it** (get within ~3.5 m).
-5. Explosion plays, new episode starts automatically.
-
----
-
-## 5. Tuning
+## 4. Tuning
 
 | File | What to change |
 |------|---------------|
-| `src/vtol_sim/vtol_sim/game_manager.py` | `HIT_DISTANCE`, `SPAWN_MIN/MAX`, explosion timings |
-| `src/vtol_sim/vtol_sim/keyboard_teleop.py` | `LINEAR_SPEED`, `ANGULAR_SPEED`, hold gains |
-| `src/vtol_sim/worlds/vtol_world.sdf` | Gazebo controller gains (`MulticopterVelocityControl`) |
+| `vtol_sim/game_manager.py` | `INTERCEPT_DIST`, `TANK_HIT_DIST`, kamikaze spawn ranges, episode timeout |
+| `vtol_sim/interceptor_node.py` | guidance law / `nav_constant`, spawn ranges |
+| `vtol_sim/interception/fixed_wing.py` | `FixedWingLimits` (airspeed, bank, climb) |
+| `vtol_sim/interception/guidance.py` | PN gain `N`, re-acquire behaviour |
+| `vtol_sim/interception/avoidance.py` | `lookahead`, `safety`, avoidance `gain` |
+| `vtol_sim/keyboard_teleop.py` | `LINEAR_SPEED`, `ANGULAR_SPEED` (kamikaze agility) |
 
-Rebuild after any edit:
-```bash
-colcon build --packages-select vtol_sim
-```
+Rebuild after any edit: `colcon build --packages-select vtol_sim`.
 
 ---
 
-## 6. Useful checks
+## 5. Useful checks
 
 ```bash
-# Is odometry flowing?
-ros2 topic echo /model/x3/odometry --field pose.pose.position
-
-# Is the game manager publishing the map?
-ros2 topic hz /game/minimap
+ros2 topic echo /interceptor/odometry --field pose.pose.position   # interceptor flying?
+ros2 topic echo /interceptor/status                                # law + range readout
+ros2 topic hz /game/minimap                                        # map publishing?
+ros2 service list | grep set_pose                                  # service bridge up?
 ```
