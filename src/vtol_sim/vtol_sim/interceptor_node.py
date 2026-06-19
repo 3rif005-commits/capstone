@@ -57,9 +57,12 @@ SPAWN_MIN_Z = 30.0
 SPAWN_MAX_Z = 45.0
 
 # The interceptor holds station (stationary in the air) until the kamikaze has
-# moved this far from where it sat at the episode start, then it launches.
+# moved this far from where it sat at the episode start...
 ARM_DISPLACEMENT = 4.0   # m
 ARM_GRACE_S = 1.0        # s: ignore the episode-start teleport settling
+# ...then it waits this long (a head start) before launching, so the duel is
+# playable. Overridable with the 'launch_delay' ROS param.
+LAUNCH_DELAY_S = 4.0
 
 
 # Inline fixed-wing visual (gravity off, no collision: pose is fully driven by
@@ -127,8 +130,10 @@ class InterceptorNode(Node):
 
         self.declare_parameter('guidance_law', 'apn')      # apn | pn | pure_pursuit
         self.declare_parameter('nav_constant', 4.0)
+        self.declare_parameter('launch_delay', LAUNCH_DELAY_S)  # head start (s)
         law_name = self.get_parameter('guidance_law').value
         N = float(self.get_parameter('nav_constant').value)
+        self._launch_delay = float(self.get_parameter('launch_delay').value)
         self._law_name = law_name
         self._law = make_law(law_name, **({} if law_name == 'pure_pursuit' else {'N': N}))
         self._field = ObstacleField(city())
@@ -140,10 +145,11 @@ class InterceptorNode(Node):
         self._model_ready = False   # True once Gazebo confirms the model exists
         self._last_bank = 0.0
 
-        # Arming: hold station until the kamikaze starts moving.
+        # Arming: hold station until the kamikaze moves, then a head-start delay.
         self._armed = False
         self._kam_start = None
         self._arm_grace_until = 0.0
+        self._launch_at = None
 
         # Kamikaze (target) state, estimated from odometry by finite difference.
         self._tgt_pos = None
@@ -251,9 +257,11 @@ class InterceptorNode(Node):
         self._fw.gamma = 0.0
         self._last_bank = 0.0
 
-        # Disarm: hold station until the kamikaze moves (after a settle grace).
+        # Disarm: hold station until the kamikaze moves (after a settle grace),
+        # then wait out the head-start delay before launching.
         self._armed = False
         self._kam_start = None
+        self._launch_at = None
         self._arm_grace_until = time.monotonic() + ARM_GRACE_S
 
         if not self._spawned:
@@ -272,19 +280,25 @@ class InterceptorNode(Node):
         if not (self._active and self._fw is not None):
             return
 
-        # ── Hold station until the kamikaze starts moving ─────────────────
+        # ── Hold station until the kamikaze moves, then a head-start delay ──
         if not self._armed:
             now = time.monotonic()
             if now >= self._arm_grace_until and self._tgt_pos is not None:
                 if self._kam_start is None:
                     self._kam_start = self._tgt_pos.copy()   # settled start point
-                elif np.linalg.norm(self._tgt_pos - self._kam_start) > ARM_DISPLACEMENT:
-                    self._armed = True
-                    print('\n[INTERCEPTOR] kamikaze moving — launching intercept!')
-            # Stationary in the air: keep the model parked, report zero velocity.
-            self._send_pose()
-            self._publish_odom(stationary=True)
-            return
+                elif (self._launch_at is None and
+                      np.linalg.norm(self._tgt_pos - self._kam_start) > ARM_DISPLACEMENT):
+                    self._launch_at = now + self._launch_delay
+                    print(f'\n[INTERCEPTOR] kamikaze moving — head start '
+                          f'{self._launch_delay:.0f}s, then launch.')
+            if self._launch_at is not None and now >= self._launch_at:
+                self._armed = True
+                print('[INTERCEPTOR] launching intercept!')
+            else:
+                # Still parked (waiting to move, or in the head-start delay).
+                self._send_pose()
+                self._publish_odom(stationary=True)
+                return
 
         # Guidance + collision-aware avoidance → lateral accel command.
         if self._tgt_pos is not None:

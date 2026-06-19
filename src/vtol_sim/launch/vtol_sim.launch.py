@@ -65,7 +65,8 @@ def generate_launch_description():
         package='vtol_sim',
         executable='interceptor_node',
         name='interceptor_node',
-        parameters=[{'guidance_law': 'apn', 'nav_constant': 4.0}],
+        parameters=[{'guidance_law': 'apn', 'nav_constant': 4.0,
+                     'launch_delay': 4.0}],   # head start (s) before it launches
         output='screen',
     )
 
