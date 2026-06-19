@@ -1,9 +1,11 @@
-# VTOL Drone Simulation — How to Run
+# VTOL Kamikaze Drone Hunt — How to Run
 
-ROS 2 **Jazzy** + Gazebo **Harmonic** (gz-sim 8). X3 quadcopter flown with a
-velocity-controller plugin and a keyboard teleop.
+ROS 2 **Jazzy** + Gazebo **Harmonic** (gz-sim 8). X3 quadcopter kamikaze game:
+find the randomly-spawned tank and dive into it!
 
-## 1. Build (first time, or after editing the code)
+---
+
+## 1. Build (first time, or after editing any source file)
 
 ```bash
 cd ~/projects/capstone
@@ -11,9 +13,11 @@ source /opt/ros/jazzy/setup.bash
 colcon build --packages-select vtol_sim
 ```
 
-## 2. Run
+---
 
-Open **two terminals**. Source the workspace in **both**:
+## 2. Run — three terminals
+
+Open **three terminals**. In **each one** run:
 
 ```bash
 cd ~/projects/capstone
@@ -21,21 +25,33 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
-**Terminal 1 — simulator + bridge + camera view:**
+### Terminal 1 — Gazebo + bridges + map/camera windows
+
 ```bash
 ros2 launch vtol_sim vtol_sim.launch.py
 ```
 
-**Terminal 2 — keyboard control:**
+This opens:
+- Gazebo 3-D world
+- Camera feed window (drone nose camera)
+- Mini-map window (bird's-eye tactical map)
+
+### Terminal 2 — Game manager (episodes, tank, hit detection)
+
+```bash
+ros2 run vtol_sim game_manager
+```
+
+Spawns the tank, detects kamikaze hits, triggers explosions, and drives the
+map image. Keep this terminal visible — it prints episode info and distance.
+
+### Terminal 3 — Keyboard control
+
 ```bash
 ros2 run vtol_sim keyboard_teleop
 ```
 
-> Tip: `./run_sim.sh` does the build + sourcing + launch for Terminal 1 in one step.
-> You still start the teleop yourself in Terminal 2 (it needs an interactive
-> terminal for the keyboard).
-
-## 3. Flying
+Needs an interactive terminal (reads keypresses). Controls:
 
 | Key | Action |
 |-----|--------|
@@ -44,27 +60,58 @@ ros2 run vtol_sim keyboard_teleop
 | `Q` / `D` | Yaw left / right |
 | Arrow ↑ / ↓ | Pitch forward / backward |
 | Arrow ← / → | Strafe left / right |
-| Space | Hover (stop motion) |
+| Space | Hover (stop all motion) |
 | Esc / Ctrl-C | Quit |
 
-The teleop holds altitude and position when you are not commanding motion, so the
-drone stays put instead of drifting.
+---
 
-## 4. Tuning knobs (top of `src/vtol_sim/vtol_sim/keyboard_teleop.py`)
+## 3. Quick-start shortcut (Terminal 1 only)
 
-| Constant | Meaning |
-|----------|---------|
-| `LINEAR_SPEED` (3.0) | Top translate speed. Lower it (e.g. 2.0) for a crisper stop / less coast. |
-| `ANGULAR_SPEED` (0.7) | Yaw rate. Higher turns faster but adds altitude dip / drift. |
-| `ALT_HOLD_KP` (1.2) | Altitude-hold stiffness. |
-| `POS_HOLD_KP` / `POS_HOLD_KD` (1.0 / 0.8) | Position-hold stiffness / damping. |
-
-Controller gains live in `src/vtol_sim/worlds/vtol_world.sdf`
-(`MulticopterVelocityControl` plugin). Rebuild after any edit (step 1).
-
-## Useful checks
+`run_sim.sh` handles the build + sourcing + launch in one shot:
 
 ```bash
-# Is orientation/altitude feedback flowing? (teleop needs this)
+cd ~/projects/capstone
+./run_sim.sh          # launch only (uses existing build)
+./run_sim.sh --build  # force rebuild first
+```
+
+You still need Terminals 2 and 3 started manually.
+
+---
+
+## 4. How to play
+
+1. Launch all three terminals in order (1 → 2 → 3).
+2. Press **T** in Terminal 3 to take off.
+3. Read the distance and heat indicator in Terminal 2 to locate the tank.
+   The **mini-map window** shows the tank (green rectangle + "TANK" label)
+   and your drone (cyan arrow pointing in your heading direction).
+4. Fly toward the tank and **dive into it** (get within ~3.5 m).
+5. Explosion plays, new episode starts automatically.
+
+---
+
+## 5. Tuning
+
+| File | What to change |
+|------|---------------|
+| `src/vtol_sim/vtol_sim/game_manager.py` | `HIT_DISTANCE`, `SPAWN_MIN/MAX`, explosion timings |
+| `src/vtol_sim/vtol_sim/keyboard_teleop.py` | `LINEAR_SPEED`, `ANGULAR_SPEED`, hold gains |
+| `src/vtol_sim/worlds/vtol_world.sdf` | Gazebo controller gains (`MulticopterVelocityControl`) |
+
+Rebuild after any edit:
+```bash
+colcon build --packages-select vtol_sim
+```
+
+---
+
+## 6. Useful checks
+
+```bash
+# Is odometry flowing?
 ros2 topic echo /model/x3/odometry --field pose.pose.position
+
+# Is the game manager publishing the map?
+ros2 topic hz /game/minimap
 ```

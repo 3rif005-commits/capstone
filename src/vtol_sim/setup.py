@@ -26,6 +26,7 @@ setup(
     entry_points={
         'console_scripts': [
             'keyboard_teleop = vtol_sim.keyboard_teleop:main',
+            'game_manager    = vtol_sim.game_manager:main',
         ],
     },
 )

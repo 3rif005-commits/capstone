@@ -65,9 +65,18 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Bird's-eye mini-map (published by game_manager)
+    rqt_minimap = Node(
+        package='rqt_image_view',
+        executable='rqt_image_view',
+        arguments=['/game/minimap'],
+        output='screen',
+    )
+
     return LaunchDescription([
         gz_sim,
         bridge,
         camera_bridge,
         rqt_image_view,
+        rqt_minimap,
     ])
