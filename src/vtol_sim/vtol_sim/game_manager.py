@@ -386,6 +386,11 @@ class GameManager(Node):
 
     # ── Minimap ──────────────────────────────────────────────────────────
     def _publish_map(self, d_tank=0.0, d_int=0.0, elapsed=0.0):
+        # Throttle to 5 Hz (the referee ticks at 10 Hz): the 750x750 image build
+        # + encode is the heavy part, and a tactical map needs no more than 5 fps.
+        self._map_frame = getattr(self, '_map_frame', 0) + 1
+        if self._map_frame % 2:
+            return
         img = self._build_map_image(d_tank, d_int, elapsed)
         msg = self._bridge.cv2_to_imgmsg(img, encoding='bgr8')
         msg.header.stamp = self.get_clock().now().to_msg()

@@ -47,7 +47,10 @@ from vtol_sim.interception.world import city
 WORLD = 'vtol_world'
 MODEL = 'interceptor'
 
-RATE_HZ = 50.0
+# 30 Hz is plenty for guidance + a smooth pose update, and roughly halves the
+# CPU/Gazebo load vs 50 Hz (each set_pose is a service round-trip the gz server
+# processes) — keeps the sim real-time factor up so flight feels like v1.
+RATE_HZ = 30.0
 DT = 1.0 / RATE_HZ
 
 # Random sky-patrol spawn (combat air patrol near the defended asset).
