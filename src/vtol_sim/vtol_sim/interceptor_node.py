@@ -51,10 +51,15 @@ RATE_HZ = 50.0
 DT = 1.0 / RATE_HZ
 
 # Random sky-patrol spawn (combat air patrol near the defended asset).
-SPAWN_MIN_R = 40.0
-SPAWN_MAX_R = 80.0
+SPAWN_MIN_R = 35.0
+SPAWN_MAX_R = 65.0
 SPAWN_MIN_Z = 30.0
 SPAWN_MAX_Z = 45.0
+
+# The interceptor holds station (stationary in the air) until the kamikaze has
+# moved this far from where it sat at the episode start, then it launches.
+ARM_DISPLACEMENT = 4.0   # m
+ARM_GRACE_S = 1.0        # s: ignore the episode-start teleport settling
 
 
 # Inline fixed-wing visual (gravity off, no collision: pose is fully driven by
@@ -133,6 +138,11 @@ class InterceptorNode(Node):
         self._active = False
         self._spawned = False
         self._last_bank = 0.0
+
+        # Arming: hold station until the kamikaze starts moving.
+        self._armed = False
+        self._kam_start = None
+        self._arm_grace_until = 0.0
 
         # Kamikaze (target) state, estimated from odometry by finite difference.
         self._tgt_pos = None
@@ -220,20 +230,27 @@ class InterceptorNode(Node):
         z = np.random.uniform(SPAWN_MIN_Z, SPAWN_MAX_Z)
         pos = np.array([dist * math.cos(bearing), dist * math.sin(bearing), z])
 
-        self._fw = FixedWing(pos=pos, speed=26.0, limits=FixedWingLimits())
-        # Aim the nose at the kamikaze (or origin if unknown) — vectoring on.
+        # Start at stall speed so arming feels like a launch (ramps to v_max).
+        lim = FixedWingLimits()
+        self._fw = FixedWing(pos=pos, speed=lim.v_min, limits=lim)
+        # Face the kamikaze (or origin) but hold a level attitude while loitering.
         aim = self._tgt_pos if self._tgt_pos is not None else np.array([0.0, 0.0, 5.0])
         d = aim - pos
         self._fw.psi = math.atan2(d[1], d[0])
-        self._fw.gamma = math.atan2(d[2], math.hypot(d[0], d[1]))
+        self._fw.gamma = 0.0
         self._last_bank = 0.0
+
+        # Disarm: hold station until the kamikaze moves (after a settle grace).
+        self._armed = False
+        self._kam_start = None
+        self._arm_grace_until = time.monotonic() + ARM_GRACE_S
 
         if not self._spawned:
             self._gz_spawn(*pos)
             self._spawned = True
         self._active = True
-        print(f'[INTERCEPTOR] engaging — spawn {pos.round(1)}, '
-              f'heading {math.degrees(self._fw.psi):.0f}°')
+        print(f'[INTERCEPTOR] holding station at {pos.round(1)} — '
+              f'waiting for the kamikaze to move...')
 
     # ── Control loop (50 Hz) ──────────────────────────────────────────────
     def _tick(self):
@@ -241,6 +258,20 @@ class InterceptorNode(Node):
             self._pending_reset = False
             self._do_reset()
         if not (self._active and self._fw is not None):
+            return
+
+        # ── Hold station until the kamikaze starts moving ─────────────────
+        if not self._armed:
+            now = time.monotonic()
+            if now >= self._arm_grace_until and self._tgt_pos is not None:
+                if self._kam_start is None:
+                    self._kam_start = self._tgt_pos.copy()   # settled start point
+                elif np.linalg.norm(self._tgt_pos - self._kam_start) > ARM_DISPLACEMENT:
+                    self._armed = True
+                    print('\n[INTERCEPTOR] kamikaze moving — launching intercept!')
+            # Stationary in the air: keep the model parked, report zero velocity.
+            self._send_pose()
+            self._publish_odom(stationary=True)
             return
 
         # Guidance + collision-aware avoidance → lateral accel command.
@@ -280,7 +311,7 @@ class InterceptorNode(Node):
         req.pose.orientation.w = qw
         self._pose_future = self._set_pose.call_async(req)
 
-    def _publish_odom(self):
+    def _publish_odom(self, stationary: bool = False):
         fw = self._fw
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -294,7 +325,7 @@ class InterceptorNode(Node):
         msg.pose.pose.orientation.y = qy
         msg.pose.pose.orientation.z = qz
         msg.pose.pose.orientation.w = qw
-        v = fw.velocity
+        v = np.zeros(3) if stationary else fw.velocity
         msg.twist.twist.linear.x = float(v[0])
         msg.twist.twist.linear.y = float(v[1])
         msg.twist.twist.linear.z = float(v[2])

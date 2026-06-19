@@ -77,9 +77,11 @@ ros2 run vtol_sim keyboard_teleop
 | Space | Hover (stop all motion) |
 | Esc / Ctrl-C | Quit |
 
-You start airborne and far out — fly toward the tank and dive in before the
-interceptor catches you. The mini-map shows **YOU** (cyan), the **INTERCEPTOR**
-(blue), the **TANK** (green), and a dashed line = the interceptor's lock on you.
+You start at the **centre on the ground** — press **T** to take off, then fly
+out to the **tank** and dive into it. The fixed-wing interceptor **holds station
+in the air until you start moving**, then launches to intercept you. The mini-map
+shows **YOU** (cyan), the **INTERCEPTOR** (blue), the **TANK** (green), and a
+dashed line = the interceptor's lock on you.
 
 ---
 

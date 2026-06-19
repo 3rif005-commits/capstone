@@ -45,12 +45,11 @@ TANK_HIT_DIST   = 4.0    # m: kamikaze reaches the tank → you win
 INTERCEPT_DIST  = 6.0    # m: interceptor reaches kamikaze → defense wins
 EPISODE_TIMEOUT = 90.0   # s: stalemate → new episode
 
-# Kamikaze (X3) starts as an incoming attacker: far out, at altitude.
-KAM_SPAWN_MIN_R = 90.0
-KAM_SPAWN_MAX_R = 140.0
-KAM_SPAWN_MIN_Z = 25.0
-KAM_SPAWN_MAX_Z = 40.0
-TANK_BASE_R     = 18.0   # tank spawns within this radius of origin (the base)
+# Kamikaze (X3) starts at the centre, on the ground (take off with T) — as in v1.
+KAM_START_Z      = 0.30
+# Tank (the objective) spawns away from the centre; you fly out to it.
+TANK_SPAWN_MIN_R = 25.0
+TANK_SPAWN_MAX_R = 60.0
 
 FIREBALL_SECS = 3.0
 SMOKE_SECS    = 2.0
@@ -268,17 +267,9 @@ class GameManager(Node):
 
     # ── Episode management ─────────────────────────────────────────────────
     def _tank_pos(self):
-        while True:
-            x = random.uniform(-TANK_BASE_R, TANK_BASE_R)
-            y = random.uniform(-TANK_BASE_R, TANK_BASE_R)
-            if math.hypot(x, y) <= TANK_BASE_R:
-                return x, y
-
-    def _kam_spawn(self):
         bearing = random.uniform(0, 2 * math.pi)
-        dist = random.uniform(KAM_SPAWN_MIN_R, KAM_SPAWN_MAX_R)
-        z = random.uniform(KAM_SPAWN_MIN_Z, KAM_SPAWN_MAX_Z)
-        return dist * math.cos(bearing), dist * math.sin(bearing), z
+        dist = random.uniform(TANK_SPAWN_MIN_R, TANK_SPAWN_MAX_R)
+        return dist * math.cos(bearing), dist * math.sin(bearing)
 
     def _start_episode(self):
         self._episode += 1
@@ -291,19 +282,19 @@ class GameManager(Node):
         self._gz_spawn(_TANK_SDF, self._tank_x, self._tank_y)
         self._tank_spawned = True
 
-        # Reposition the kamikaze (X3) as an incoming attacker.
-        kx, ky, kz = self._kam_spawn()
-        self._gz_set_pose('x3', kx, ky, kz)
+        # Reset the kamikaze (X3) to the centre, on the ground.
+        self._gz_set_pose('x3', 0.0, 0.0, KAM_START_Z)
 
-        # Tell the interceptor to (re)spawn and re-aim.
+        # Tell the interceptor to (re)spawn and re-aim (it loiters until you move).
         self._reset_pub.publish(Empty())
 
         self._ep_start = time.monotonic()
         self._state = 'ACTIVE'
         dist = math.hypot(self._tank_x, self._tank_y)
-        print(f'\n[EPISODE {self._episode}]  Tank at base; you spawn ~'
-              f'{math.hypot(kx, ky):.0f} m out, {kz:.0f} m alt {_compass(kx, ky)}.')
-        print('Dive into the tank before the interceptor catches you!')
+        print(f'\n[EPISODE {self._episode}]  Tank ~{dist:.0f} m '
+              f'{_compass(self._tank_x, self._tank_y)}. Take off with T, '
+              f'dive into the tank before the interceptor catches you!')
+        print('(The interceptor holds station until you start moving.)')
 
     # ── Main tick (10 Hz) ─────────────────────────────────────────────────
     def _tick(self):
