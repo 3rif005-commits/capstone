@@ -42,8 +42,17 @@ from std_msgs.msg import Empty, String
 # ── Tuning ────────────────────────────────────────────────────────────────────
 
 TANK_HIT_DIST   = 4.0    # m: kamikaze reaches the tank → you win
-INTERCEPT_DIST  = 6.0    # m: interceptor reaches kamikaze → defense wins
-EPISODE_TIMEOUT = 90.0   # s: stalemate → new episode
+INTERCEPT_DIST  = 9.0    # m: interceptor reaches kamikaze → defense wins.
+                         #    Real HIL kills cluster at ~8.8 m, so 9 m lets a
+                         #    genuine close pass score while still giving the
+                         #    player a real chance to dodge (13 m felt unfair).
+# Timeout disabled by design — a round only ends on a decisive win (you reach
+# the tank, or the interceptor catches you). Kept for reference / easy re-enable.
+# EPISODE_TIMEOUT = 90.0
+GRACE_SECS      = 3.0    # s: referee ignores intercept/hit checks at episode
+                         #    start so stale odometry can't trigger an instant win
+RESULT_HOLD_SECS = 3.0   # s: hold on the result (banner + explosion) before the
+                         #    next round, so every outcome is clearly visible
 
 # Kamikaze (X3) starts at the centre, on the ground (take off with T) — as in v1.
 KAM_START_Z      = 0.30
@@ -51,7 +60,7 @@ KAM_START_Z      = 0.30
 TANK_SPAWN_MIN_R = 25.0
 TANK_SPAWN_MAX_R = 60.0
 
-FIREBALL_SECS = 3.0
+FIREBALL_SECS = 3.5
 SMOKE_SECS    = 2.0
 
 WORLD = 'vtol_world'
@@ -127,7 +136,7 @@ _FIREBALL_SDF = _compact("""
       <static>true</static>
       <link name='blast'>
         <visual name='vis'>
-          <geometry><sphere><radius>5.0</radius></sphere></geometry>
+          <geometry><sphere><radius>7.0</radius></sphere></geometry>
           <material>
             <ambient>1.0 0.40 0.00 0.90</ambient>
             <diffuse>1.0 0.20 0.00 0.90</diffuse>
@@ -282,7 +291,11 @@ class GameManager(Node):
         self._gz_spawn(_TANK_SDF, self._tank_x, self._tank_y)
         self._tank_spawned = True
 
-        # Reset the kamikaze (X3) to the centre, on the ground.
+        # Recenter the kamikaze (X3) to its start position when a round begins:
+        # back to the centre, on the ground (take off again with T). This runs
+        # exactly once per round — the GRACE_SECS gate in _tick stops the old
+        # instant-win loop from calling _start_episode many times a second, so it
+        # no longer strobes. (It is a clean reset at round end, never mid-flight.)
         self._gz_set_pose('x3', 0.0, 0.0, KAM_START_Z)
 
         # Tell the interceptor to (re)spawn and re-aim (it loiters until you move).
@@ -304,7 +317,7 @@ class GameManager(Node):
             self._publish_map()
             return
 
-        if self._state in ('KAMIKAZE_WIN', 'DEFENSE_WIN'):
+        if self._state in ('KAMIKAZE_WIN', 'DEFENSE_WIN', 'TIMEOUT'):
             self._publish_map()
             return
 
@@ -330,15 +343,21 @@ class GameManager(Node):
         sys.stdout.flush()
         self._publish_map(d_tank=d_tank, d_int=d_int, elapsed=elapsed)
 
+        # Grace period: at episode start the interceptor/kamikaze odometry can
+        # still be stale from the previous round, which would otherwise fire an
+        # immediate DEFENSE_WIN and tight-loop the game. Hold off on resolving.
+        if elapsed < GRACE_SECS:
+            return
+
+        # No timeout: a round runs until it is decided — either you reach the
+        # tank (KAMIKAZE_WIN) or the interceptor catches you (DEFENSE_WIN).
         if d_int < INTERCEPT_DIST:
             self._end_episode('DEFENSE_WIN', elapsed, d_int, d_tank)
         elif d_tank < TANK_HIT_DIST:
             self._end_episode('KAMIKAZE_WIN', elapsed, d_int, d_tank)
-        elif elapsed > EPISODE_TIMEOUT:
-            self._end_episode('TIMEOUT', elapsed, d_int, d_tank)
 
     def _end_episode(self, outcome, elapsed, d_int, d_tank):
-        self._state = outcome if outcome != 'TIMEOUT' else 'KAMIKAZE_WIN'  # draw map state
+        self._state = outcome   # ACTIVE → KAMIKAZE_WIN | DEFENSE_WIN | TIMEOUT
         self._log_metric(outcome, elapsed, d_int, d_tank)
         threading.Thread(target=self._resolve, args=(outcome, elapsed), daemon=True).start()
 
@@ -364,6 +383,10 @@ class GameManager(Node):
             self._gz_spawn(_SMOKE_SDF, ex, ey, ez)
             time.sleep(SMOKE_SECS)
             self._gz_remove('explosion_smoke')
+        else:
+            # No explosion on a timeout — still hold so the result banner is
+            # visible and the next round doesn't seem to start "for no reason".
+            time.sleep(RESULT_HOLD_SECS)
 
         self._start_episode()
 
@@ -386,10 +409,12 @@ class GameManager(Node):
 
     # ── Minimap ──────────────────────────────────────────────────────────
     def _publish_map(self, d_tank=0.0, d_int=0.0, elapsed=0.0):
-        # Throttle to 5 Hz (the referee ticks at 10 Hz): the 750x750 image build
-        # + encode is the heavy part, and a tactical map needs no more than 5 fps.
+        # Throttle to ~2.5 Hz (referee ticks at 10 Hz). The 750x750 build+encode
+        # is the heavy part; on this CPU it competes with the gz->ros bridge, so
+        # a slower tactical map frees cycles for the odometry that actually drives
+        # the chase. Every 4th tick is plenty for a map.
         self._map_frame = getattr(self, '_map_frame', 0) + 1
-        if self._map_frame % 2:
+        if self._map_frame % 4:
             return
         img = self._build_map_image(d_tank, d_int, elapsed)
         msg = self._bridge.cv2_to_imgmsg(img, encoding='bgr8')
@@ -489,12 +514,30 @@ class GameManager(Node):
         cv2.rectangle(img, (0, 0), (S, 34), (20, 20, 20), -1)
         m, s = divmod(int(elapsed), 60)
         status = {'ACTIVE': 'ENGAGED', 'KAMIKAZE_WIN': 'TANK DESTROYED',
-                  'DEFENSE_WIN': 'KAMIKAZE SPLASHED', 'WAITING': 'STANDBY'}.get(
-                      self._state, self._state)
+                  'DEFENSE_WIN': 'KAMIKAZE SPLASHED', 'WAITING': 'STANDBY',
+                  'TIMEOUT': 'TIMEOUT - NO WINNER'}.get(self._state, self._state)
         hud = (f'Ep {self._episode}  {m:02d}:{s:02d}  You {self._kam_score}'
                f' : {self._def_score} Def   tank:{d_tank:5.1f}m  intc:{d_int:5.1f}m'
                f'   {status}')
         cv2.putText(img, hud, (6, 23), font, 0.5, (220, 220, 220), 1)
+
+        # Big centre result banner so every outcome is unmistakable.
+        banner = {'DEFENSE_WIN': ('INTERCEPTED!', (60, 90, 255)),
+                  'KAMIKAZE_WIN': ('TANK DESTROYED!', (0, 230, 255)),
+                  'TIMEOUT': ('TIMEOUT', (180, 180, 180))}.get(self._state)
+        if banner:
+            text, color = banner
+            scale, thick = 1.6, 4
+            (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+            ox, oy = (S - tw) // 2, (S + th) // 2
+            sub = ('Defense scores' if self._state == 'DEFENSE_WIN' else
+                   'You score' if self._state == 'KAMIKAZE_WIN' else 'No winner')
+            cv2.rectangle(img, (ox - 24, oy - th - 26), (ox + tw + 24, oy + 44),
+                          (15, 15, 15), -1)
+            cv2.putText(img, text, (ox + 2, oy + 2), font, scale, (0, 0, 0), thick + 2)
+            cv2.putText(img, text, (ox, oy), font, scale, color, thick)
+            cv2.putText(img, sub, (ox, oy + 32), font, 0.7, (220, 220, 220), 2)
+
         cv2.rectangle(img, (0, 0), (S - 1, S - 1), (160, 160, 160), 2)
         return img
 

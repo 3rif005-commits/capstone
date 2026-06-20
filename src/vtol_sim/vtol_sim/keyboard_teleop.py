@@ -24,7 +24,9 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 
-LINEAR_SPEED  = 3.0   # m/s
+LINEAR_SPEED  = 4.0   # m/s  (raised from 3.0 to give the player a fighting
+                      #       chance vs the interceptor. If the X3 starts to flip
+                      #       under hard input, drop this back toward 3.0-3.5.)
 ANGULAR_SPEED = 0.7   # rad/s  (gentle yaw -> small thrust disturbance, so
                       # little altitude dip / sideways drift, and little heading
                       # overshoot when released)

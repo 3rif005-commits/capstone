@@ -26,10 +26,11 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'keyboard_teleop  = vtol_sim.keyboard_teleop:main',
-            'game_manager     = vtol_sim.game_manager:main',
-            'interceptor_node = vtol_sim.interceptor_node:main',
-            'engagement_sim   = vtol_sim.interception.engagement_sim:main',
+            'keyboard_teleop         = vtol_sim.keyboard_teleop:main',
+            'game_manager            = vtol_sim.game_manager:main',
+            'interceptor_node        = vtol_sim.interceptor_node:main',
+            'interceptor_bridge_node = vtol_sim.interceptor_bridge_node:main',
+            'engagement_sim          = vtol_sim.interception.engagement_sim:main',
         ],
     },
 )
