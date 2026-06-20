@@ -61,6 +61,36 @@ Each entity gets its **own camera language** matched to its character:
 
 ---
 
+## Implementation (built — Phase 1)
+Fully puppeted, self-contained scene (does not touch the live game code). All
+camera moves and drone motion are scripted pose timelines driven into Gazebo via
+the same `SetEntityPose` service the interceptor already uses.
+
+| File | Role |
+|---|---|
+| `vtol_sim/machinima/camera_moves.py` | Pure-math camera primitives (orbit, crane, dolly, fly-by/whip-pan, chase, Dutch tilt) + look-at→quaternion. Unit-testable. |
+| `vtol_sim/machinima/shots.py` | The scenario as data — the 11-shot list (Act 1/2/3), ~50s. **Tune pacing/framing here.** Geometry knobs in `SCENE`. |
+| `vtol_sim/machinima_director.py` | Spawns the cast (tank + puppet drones + fireball/smoke), plays the shot timeline, drives the `cine_cam`, gates the recorder, self-exits when done. |
+| `vtol_sim/machinima_recorder.py` | `cine_cam` image → `media/machinima_<ts>.mp4` via `cv2.VideoWriter`; start/stop gated by `/machinima/record`. |
+| `worlds/machinima_world.sdf` | City scenery (from `vtol_world`) minus the physics X3, plus a movable `cine_cam` camera sensor (1280×720). |
+| `launch/machinima.launch.py` | gz + service bridge + image bridge + director + recorder. |
+
+**How to run:**
+```bash
+colcon build --packages-select vtol_sim
+source install/setup.bash
+ros2 launch vtol_sim machinima.launch.py
+# the take plays + records itself; output -> media/machinima_<timestamp>.mp4
+```
+Verified headless end-to-end: cast spawns, camera flies the shots, a real
+1280×720 mp4 is written, director self-terminates cleanly. **Visual framing must
+be judged on a display — that's the next pass.**
+
+**Known item — playback speed:** the recorder writes a fixed 30 fps (`fps`
+param). If the sim doesn't render a real-time 30 fps, the clip looks sped-up /
+slowed. On a GPU machine with RTF≈1 it should be fine; otherwise set the `fps`
+param to the measured rate or retime in post.
+
 ## Open / to-adjust later
 - Exact camera paths & timings per shot.
 - Act 3 outcome framing (clean DEFENSE_WIN vs slow-mo money shot at the catch).

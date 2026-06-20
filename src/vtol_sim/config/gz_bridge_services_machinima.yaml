@@ -1,0 +1,8 @@
+# ros_gz_bridge service bridge for the machinima scene: lets machinima_director
+# drive the cine_cam + puppet poses via an async ROS service client (SetEntityPose)
+# instead of per-tick subprocesses. Mirrors gz_bridge_services.yaml but targets
+# the machinima_world.
+- service_name: "/world/machinima_world/set_pose"
+  ros_type_name: "ros_gz_interfaces/srv/SetEntityPose"
+  gz_req_type_name: "gz.msgs.Pose"
+  gz_rep_type_name: "gz.msgs.Boolean"

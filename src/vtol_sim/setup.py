@@ -31,6 +31,8 @@ setup(
             'interceptor_node        = vtol_sim.interceptor_node:main',
             'interceptor_bridge_node = vtol_sim.interceptor_bridge_node:main',
             'engagement_sim          = vtol_sim.interception.engagement_sim:main',
+            'machinima_director      = vtol_sim.machinima_director:main',
+            'machinima_recorder      = vtol_sim.machinima_recorder:main',
         ],
     },
 )
