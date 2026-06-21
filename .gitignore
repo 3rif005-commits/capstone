@@ -16,6 +16,7 @@ media/
 src/vtol_sim/media/
 *.mp4
 !docs/demo.mp4
+!docs/demo_thumb.png
 
 # Local network config — copy .env.example → .env and fill in your IPs
 .env
