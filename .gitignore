@@ -15,6 +15,7 @@ v2_metrics.csv
 media/
 src/vtol_sim/media/
 *.mp4
+!docs/demo.mp4
 
 # Local network config — copy .env.example → .env and fill in your IPs
 .env
