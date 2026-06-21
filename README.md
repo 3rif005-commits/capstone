@@ -8,7 +8,7 @@ An autonomous aerial interception system built with ROS 2 Jazzy and Gazebo Harmo
 
 ## Demo
 
-https://github.com/3rif005-commits/capstone/raw/master/docs/demo.mp4
+![Gameplay demo](docs/demo.mp4)
 
 ---
 
