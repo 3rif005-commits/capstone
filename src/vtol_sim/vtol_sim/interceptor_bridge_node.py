@@ -15,8 +15,8 @@ pure ROS2/Gazebo glue:
   └───────────────────────────────────────────────────────┘
 
 Run (after the normal launch file is up, RPi runner already started):
-  ros2 run vtol_sim interceptor_bridge_node \\
-      --ros-args -p rpi_ip:=192.168.1.79
+  export RPI_IP=<your-rpi-ip>
+  ros2 launch vtol_sim vtol_sim_hil.launch.py
 """
 
 import json
@@ -120,7 +120,7 @@ class InterceptorBridgeNode(Node):
     def __init__(self):
         super().__init__('interceptor_bridge_node')
 
-        self.declare_parameter('rpi_ip',      '192.168.1.79')
+        self.declare_parameter('rpi_ip',      '')
         self.declare_parameter('rpi_port',    RPI_PORT)
         self.declare_parameter('bridge_port', BRIDGE_PORT)
         self.declare_parameter('guidance_law','apn')

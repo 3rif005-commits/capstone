@@ -13,4 +13,12 @@ v2_metrics.csv
 
 # Machinima recorder output (large video, regenerated each take)
 media/
+src/vtol_sim/media/
+*.mp4
+
+# Local network config — copy .env.example → .env and fill in your IPs
+.env
+
+# Claude Code local settings (permissions, personal config)
+.claude/
 

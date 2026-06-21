@@ -11,8 +11,16 @@
 
 set -euo pipefail
 
-RPI_USER="ayoub"
-RPI_HOST="192.168.1.79"
+# Load .env if present (project root is one level above scripts/)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../.env"
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  set -a; source "$ENV_FILE"; set +a
+fi
+
+RPI_USER="${RPI_USER:-ayoub}"
+RPI_HOST="${RPI_IP:-}"
 RPI_DIR="~/interceptor"
 SSH_KEY="$HOME/.ssh/rpi_key"
 LAW="apn"
@@ -25,8 +33,19 @@ for arg in "$@"; do
   esac
 done
 
-PC_IP=$(ip addr show wlp3s0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
-PC_IP="${PC_IP:-192.168.1.72}"
+if [ -z "$RPI_HOST" ]; then
+  echo "ERROR: RPI_IP is not set. Copy .env.example to .env and set RPI_IP." >&2
+  exit 1
+fi
+
+# Auto-detect PC IP from the active wireless interface; fall back to PC_IP env var.
+_detected=$(ip addr show wlp3s0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+PC_IP="${_detected:-${PC_IP:-}}"
+
+if [ -z "$PC_IP" ]; then
+  echo "ERROR: Cannot detect PC IP. Set PC_IP in .env or connect to the network." >&2
+  exit 1
+fi
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)/src/vtol_sim/vtol_sim"
 

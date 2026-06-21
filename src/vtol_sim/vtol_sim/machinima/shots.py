@@ -99,21 +99,13 @@ def build_shots(scene: dict | None = None) -> List[Shot]:
         entities=lambda u: {**_park(KAM, INT)},
     ))
 
-    # ---- Kamikaze: "the threat" — fast Dutch-tilt arc, then a buzz-by.
+    # ---- Kamikaze: "the threat" — a fast buzz-by first (energy), then a tight
+    # detail orbit that ENDS close on the drone (so the briefing panel lands on
+    # a clean, readable frame at the end of the kamikaze cinematic).
     def kam_hover_fn(u: float) -> Dict[str, Pose6]:
         # gentle idle bob + slow yaw so it reads as 'alive' while we orbit it.
         p = kam_h + np.array([0.0, 0.0, 0.3 * math.sin(2 * math.pi * u)])
         return {KAM: _pose(p, yaw=math.radians(40 * u)), **_park(INT)}
-
-    # Tight, slow detail orbit — close enough to read the body, arms and rotors.
-    # NOTE: orbit `height` is an OFFSET above the centre, so keep it small (~1 m)
-    # to sit right beside the drone; a big value puts the camera way overhead.
-    shots.append(Shot(
-        'A1_kam_arc', 5.0,
-        cm.orbit(center=kam_h, radius=2.4, height=0.8,
-                 start_deg=20, sweep_deg=160, look_height=0.0),
-        entities=kam_hover_fn,
-    ))
 
     # Buzz-by: kamikaze whips close past a fixed, Dutch-tilted lens.
     kbuzz = _line(kam_h + np.array([-9, -6, 1.5]), kam_h + np.array([7, 8, -0.5]))
@@ -125,20 +117,24 @@ def build_shots(scene: dict | None = None) -> List[Shot]:
                                        pitch=math.radians(-12)), **_park(INT)},
     ))
 
-    # ---- Interceptor: "the hero" — banking fly-by + tracking chase.
-    ifly = _line(np.array([-60, -25, 30]), np.array([40, 18, 26]))
+    # Tight, slow detail orbit — close enough to read the body, arms and rotors.
+    # NOTE: orbit `height` is an OFFSET above the centre, so keep it small (~1 m)
+    # to sit right beside the drone; a big value puts the camera way overhead.
     shots.append(Shot(
-        'A1_int_flyby', 4.0,
-        cm.track_subject(eye=np.array([-5, -30, 18]), subject_path=ifly),
+        'A1_kam_arc', 5.0,
+        cm.orbit(center=kam_h, radius=2.4, height=0.8,
+                 start_deg=20, sweep_deg=160, look_height=0.0),
+        entities=kam_hover_fn,
+    ))
+
+    # ---- Interceptor: "the hero" — a single banking fly-by that ENDS with the
+    # craft small but clearly visible in the sky (the briefing/freeze frame).
+    ifly = _line(np.array([-55, -25, 29]), np.array([20, 10, 27]))
+    shots.append(Shot(
+        'A1_int_flyby', 5.0,
+        cm.track_subject(eye=np.array([-5, -30, 16]), subject_path=ifly),
         entities=lambda u: {INT: _pose(ifly(u), yaw=_heading(ifly, u),
                                        roll=math.radians(-18)), **_park(KAM)},
-    ))
-    ichase = _line(np.array([40, 18, 26]), np.array([10, -10, 16]))
-    shots.append(Shot(
-        'A1_int_chase', 5.0,
-        cm.chase(subject_path=ichase, offset=np.array([-9, -7, 3]), look_ahead=6.0),
-        entities=lambda u: {INT: _pose(ichase(u), yaw=_heading(ichase, u),
-                                       roll=math.radians(25 * math.sin(math.pi * u)))},
     ))
 
     # ======================= ACT 2 — COLD-OPEN TRAILER KILL =======================

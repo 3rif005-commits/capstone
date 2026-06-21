@@ -11,7 +11,7 @@ Receives raw kamikaze position from the PC bridge via UDP, runs the full
 No ROS2 or Gazebo dependency — only Python 3 + numpy required.
 
 Usage (on RPi):
-  python3 interceptor_runner.py [--pc-ip 192.168.1.72] [--law apn]
+  python3 interceptor_runner.py [--pc-ip <PC_IP>] [--law apn]
 """
 
 import argparse
@@ -65,7 +65,8 @@ GROUND_GAIN  = 4.0     # m/s^2 per metre below GROUND_SOFT
 
 def parse_args():
     p = argparse.ArgumentParser(description='RPi HIL guidance runner')
-    p.add_argument('--pc-ip',       default='192.168.1.72')
+    p.add_argument('--pc-ip',       default=os.environ.get('PC_IP', ''),
+                   help='IP of the PC running the simulator (or set PC_IP env var)')
     p.add_argument('--law',         default='apn',
                    choices=['apn', 'pn', 'pure_pursuit'])
     p.add_argument('--nav-n',       type=float, default=4.0)

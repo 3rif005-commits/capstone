@@ -3,6 +3,9 @@
 interceptor_node is replaced by interceptor_bridge_node, which forwards
 odometry to the RPi and applies the RPi's computed pose to Gazebo.
 
+Before launching, set your IPs (copy .env.example to .env first):
+  export RPI_IP=<your-rpi-ip>
+
 Terminal 1 (this launch file):
   ros2 launch vtol_sim vtol_sim_hil.launch.py
 
@@ -10,7 +13,7 @@ Terminal 2 (keyboard control):
   ros2 run vtol_sim keyboard_teleop
 
 RPi (already running after deploy_rpi.sh --start):
-  python3 ~/interceptor/interceptor_runner.py --pc-ip 192.168.1.72
+  python3 ~/interceptor/interceptor_runner.py --pc-ip <your-pc-ip>
 """
 import os
 
@@ -21,6 +24,15 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    rpi_ip = os.environ.get('RPI_IP', '')
+    if not rpi_ip:
+        raise RuntimeError(
+            "RPI_IP environment variable is not set.\n"
+            "Copy .env.example to .env, fill in your RPi IP, then:\n"
+            "  export RPI_IP=<your-rpi-ip>\n"
+            "  ros2 launch vtol_sim vtol_sim_hil.launch.py"
+        )
+
     pkg = get_package_share_directory('vtol_sim')
     world = os.path.join(pkg, 'worlds', 'vtol_world.sdf')
     models_dir = os.path.join(pkg, 'models')
@@ -63,7 +75,7 @@ def generate_launch_description():
         executable='interceptor_bridge_node',
         name='interceptor_bridge_node',
         parameters=[{
-            'rpi_ip':      '192.168.1.79',
+            'rpi_ip':      rpi_ip,
             'guidance_law': 'apn',
         }],
         output='screen',
