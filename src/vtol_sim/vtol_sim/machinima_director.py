@@ -79,36 +79,31 @@ _INTERCEPTOR_SDF = _compact("""
   </link></model></sdf>
 """)
 
-# Menacing dark quad with red accents — the kamikaze stand-in.
-_KAMIKAZE_SDF = _compact("""
+# Kamikaze stand-in = the SAME X3 game drone (fuel mesh), as a single rigid,
+# gravity-off, collision-free visual link so it's purely pose-driven. Rotor
+# colours match the game model (blue/red). The fuel meshes are already cached
+# locally because the game world loads them.
+_X3_MESH = ('https://fuel.gazebosim.org/1.0/openrobotics/models/'
+            'x3 uav/4/files/meshes')
+_KAMIKAZE_SDF = _compact(f"""
   <sdf version='1.6'><model name='kamikaze'><link name='body'>
     <gravity>false</gravity>
-    <inertial><mass>1.0</mass><inertia><ixx>0.02</ixx><iyy>0.02</iyy><izz>0.02</izz>
+    <inertial><mass>1.5</mass><inertia><ixx>0.0347</ixx><iyy>0.07</iyy><izz>0.0977</izz>
       <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-    <visual name='core'><geometry><box><size>0.45 0.45 0.16</size></box></geometry>
-      <material><ambient>0.05 0.05 0.06 1</ambient><diffuse>0.08 0.08 0.10 1</diffuse></material></visual>
-    <visual name='warhead'><pose>0.28 0 0 0 1.5708 0</pose>
-      <geometry><cylinder><radius>0.08</radius><length>0.22</length></cylinder></geometry>
-      <material><ambient>0.80 0.10 0.05 1</ambient><diffuse>0.95 0.12 0.05 1</diffuse>
-        <emissive>0.4 0.02 0.0 1</emissive></material></visual>
-    <visual name='arm1'><pose>0 0 0 0 0 0.7854</pose>
-      <geometry><box><size>0.95 0.05 0.04</size></box></geometry>
-      <material><ambient>0.05 0.05 0.06 1</ambient><diffuse>0.08 0.08 0.10 1</diffuse></material></visual>
-    <visual name='arm2'><pose>0 0 0 0 0 -0.7854</pose>
-      <geometry><box><size>0.95 0.05 0.04</size></box></geometry>
-      <material><ambient>0.05 0.05 0.06 1</ambient><diffuse>0.08 0.08 0.10 1</diffuse></material></visual>
-    <visual name='r0'><pose>0.34 0.34 0.05 0 0 0</pose>
-      <geometry><cylinder><radius>0.18</radius><length>0.02</length></cylinder></geometry>
-      <material><ambient>0.10 0.10 0.12 0.6</ambient><diffuse>0.12 0.12 0.14 0.6</diffuse></material></visual>
-    <visual name='r1'><pose>-0.34 0.34 0.05 0 0 0</pose>
-      <geometry><cylinder><radius>0.18</radius><length>0.02</length></cylinder></geometry>
-      <material><ambient>0.10 0.10 0.12 0.6</ambient><diffuse>0.12 0.12 0.14 0.6</diffuse></material></visual>
-    <visual name='r2'><pose>0.34 -0.34 0.05 0 0 0</pose>
-      <geometry><cylinder><radius>0.18</radius><length>0.02</length></cylinder></geometry>
-      <material><ambient>0.10 0.10 0.12 0.6</ambient><diffuse>0.12 0.12 0.14 0.6</diffuse></material></visual>
-    <visual name='r3'><pose>-0.34 -0.34 0.05 0 0 0</pose>
-      <geometry><cylinder><radius>0.18</radius><length>0.02</length></cylinder></geometry>
-      <material><ambient>0.10 0.10 0.12 0.6</ambient><diffuse>0.12 0.12 0.14 0.6</diffuse></material></visual>
+    <visual name='body'>
+      <geometry><mesh><scale>1 1 1</scale><uri>{_X3_MESH}/x3.dae</uri></mesh></geometry></visual>
+    <visual name='r0'><pose>0.13 -0.22 0.023 0 0 0</pose>
+      <geometry><mesh><scale>0.1 0.1 0.1</scale><uri>{_X3_MESH}/propeller_ccw.dae</uri></mesh></geometry>
+      <material><ambient>0.10 0.10 0.80 1</ambient><diffuse>0.12 0.12 0.95 1</diffuse></material></visual>
+    <visual name='r1'><pose>-0.13 0.2 0.023 0 0 0</pose>
+      <geometry><mesh><scale>0.1 0.1 0.1</scale><uri>{_X3_MESH}/propeller_ccw.dae</uri></mesh></geometry>
+      <material><ambient>0.80 0.10 0.10 1</ambient><diffuse>0.95 0.12 0.12 1</diffuse></material></visual>
+    <visual name='r2'><pose>0.13 0.22 0.023 0 0 0</pose>
+      <geometry><mesh><scale>0.1 0.1 0.1</scale><uri>{_X3_MESH}/propeller_cw.dae</uri></mesh></geometry>
+      <material><ambient>0.10 0.10 0.80 1</ambient><diffuse>0.12 0.12 0.95 1</diffuse></material></visual>
+    <visual name='r3'><pose>-0.13 -0.2 0.023 0 0 0</pose>
+      <geometry><mesh><scale>0.1 0.1 0.1</scale><uri>{_X3_MESH}/propeller_cw.dae</uri></mesh></geometry>
+      <material><ambient>0.80 0.10 0.10 1</ambient><diffuse>0.95 0.12 0.12 1</diffuse></material></visual>
   </link></model></sdf>
 """)
 
@@ -126,8 +121,14 @@ _TANK_SDF = _compact("""
   </link></model></sdf>
 """)
 
+# NOTE: NON-static, gravity-off, no collision. gz-sim does not promptly update
+# the rendered pose of <static> models, so set_pose-driven explosions lagged
+# badly. Non-static (like the drones) updates instantly.
 _FIREBALL_SDF = _compact("""
-  <sdf version='1.6'><model name='explosion_fireball'><static>true</static><link name='blast'>
+  <sdf version='1.6'><model name='explosion_fireball'><link name='blast'>
+    <gravity>false</gravity>
+    <inertial><mass>0.1</mass><inertia><ixx>0.1</ixx><iyy>0.1</iyy><izz>0.1</izz>
+      <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
     <visual name='vis'><geometry><sphere><radius>7.0</radius></sphere></geometry>
       <material><ambient>1.0 0.40 0.00 0.90</ambient><diffuse>1.0 0.20 0.00 0.90</diffuse>
         <emissive>0.9 0.30 0.00 1.0</emissive></material></visual>
@@ -135,7 +136,10 @@ _FIREBALL_SDF = _compact("""
 """)
 
 _SMOKE_SDF = _compact("""
-  <sdf version='1.6'><model name='explosion_smoke'><static>true</static><link name='cloud'>
+  <sdf version='1.6'><model name='explosion_smoke'><link name='cloud'>
+    <gravity>false</gravity>
+    <inertial><mass>0.1</mass><inertia><ixx>0.1</ixx><iyy>0.1</iyy><izz>0.1</izz>
+      <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
     <visual name='vis'><geometry><sphere><radius>4.0</radius></sphere></geometry>
       <material><ambient>0.07 0.07 0.07 0.80</ambient><diffuse>0.10 0.10 0.10 0.80</diffuse></material></visual>
   </link></model></sdf>
@@ -166,7 +170,16 @@ class MachinimaDirector(Node):
         self._recording = False
         self._done = False
         self._finish_mono = None
-        self._futures = {}                  # per-entity single-flight set_pose
+        # Pose driving: ONE set_pose request in flight at a time (the bridged
+        # service drops concurrent requests, which froze every entity after the
+        # first tick). _apply just records desired poses; _pump sends the one
+        # that is MOST out of date (largest move since last sent). This keeps
+        # the camera/drones smooth AND makes a teleporting prop (an explosion
+        # jumping onto the tank, the fireball vanishing) preempt instantly,
+        # while static entities that never move are never re-sent.
+        self._targets = {}                  # name -> (x,y,z,qx,qy,qz,qw)
+        self._last_sent = {}                # name -> last pose actually sent
+        self._inflight = None
 
         latched = QoSProfile(depth=1,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -175,6 +188,7 @@ class MachinimaDirector(Node):
         self._set_pose = self.create_client(SetEntityPose, f'/world/{WORLD}/set_pose')
 
         self.create_timer(DT, self._tick)
+        self.create_timer(1.0 / 90.0, self._pump)   # drain pose queue, 1 in flight
         threading.Thread(target=self._bringup, daemon=True).start()
         print(f'[DIRECTOR] "Intercept" — {len(self._shots)} shots, '
               f'{self._total:.0f}s — waiting for Gazebo...')
@@ -224,23 +238,48 @@ class MachinimaDirector(Node):
             time.sleep(0.6)
         print(f'[DIRECTOR]   spawn {name}: FAILED after {attempts} attempts')
 
-    # ── Pose driver (per-entity single-flight) ──────────────────────────────────
+    # ── Pose driver (single in-flight request, round-robin pump) ────────────────
     def _set(self, name, x, y, z, qx, qy, qz, qw):
+        """Record the desired pose; _pump actually sends it."""
+        self._targets[name] = (float(x), float(y), float(z), qx, qy, qz, qw)
+
+    def _pump(self):
+        """Send at most one set_pose request at a time (concurrent requests to
+        the bridged service get dropped). Each call sends the entity whose target
+        has moved the most since it was last sent, so nothing stalls and big
+        jumps (explosions) preempt smoothly-moving entities."""
         if not self._set_pose.service_is_ready():
             return
-        fut = self._futures.get(name)
-        if fut is not None and not fut.done():
+        if self._inflight is not None and not self._inflight.done():
             return
+        best, best_d = None, 0.0
+        for name, tgt in self._targets.items():
+            ls = self._last_sent.get(name)
+            if ls is None:
+                d = 1e12                        # never sent -> top priority
+            else:
+                dp = ((tgt[0] - ls[0]) ** 2 + (tgt[1] - ls[1]) ** 2
+                      + (tgt[2] - ls[2]) ** 2) ** 0.5
+                dot = abs(tgt[3] * ls[3] + tgt[4] * ls[4]
+                          + tgt[5] * ls[5] + tgt[6] * ls[6])
+                dq = 1.0 - min(1.0, dot)        # 0 = same heading, ~1 = flipped
+                d = dp + 12.0 * dq              # so pure pans (fixed eye) still update
+            if d > best_d:
+                best, best_d = name, d
+        if best is None or best_d <= 1e-6:      # nothing changed
+            return
+        x, y, z, qx, qy, qz, qw = self._targets[best]
         req = SetEntityPose.Request()
-        req.entity.name = name
-        req.entity.type = 2                 # MODEL
+        req.entity.name = best
+        req.entity.type = 2                     # MODEL
         req.pose = Pose()
-        req.pose.position.x = float(x)
-        req.pose.position.y = float(y)
-        req.pose.position.z = float(z)
+        req.pose.position.x = x
+        req.pose.position.y = y
+        req.pose.position.z = z
         req.pose.orientation.x, req.pose.orientation.y = qx, qy
         req.pose.orientation.z, req.pose.orientation.w = qz, qw
-        self._futures[name] = self._set_pose.call_async(req)
+        self._inflight = self._set_pose.call_async(req)
+        self._last_sent[best] = self._targets[best]
 
     # ── Timeline ────────────────────────────────────────────────────────────────
     def _current_shot(self, t):

@@ -44,6 +44,9 @@ class MachinimaRecorder(Node):
         self._writer = None
         self._path = None
         self._frames = 0
+        self._t_first = None
+        self._t_last = None
+        self._size = None
 
         self.create_subscription(Image, self._topic, self._on_image, 10)
 
@@ -66,6 +69,9 @@ class MachinimaRecorder(Node):
         stamp = time.strftime('%Y%m%d_%H%M%S')
         self._path = os.path.join(self._out_dir, f'machinima_{stamp}.mp4')
         self._frames = 0
+        self._t_first = None
+        self._t_last = None
+        self._size = None
         # Writer is opened lazily on the first frame (needs the frame size).
         print(f'[REC] ARMED -> {self._path}')
 
@@ -73,21 +79,56 @@ class MachinimaRecorder(Node):
         if self._writer is not None:
             self._writer.release()
             secs = self._frames / self._fps if self._fps else 0.0
-            print(f'[REC] STOP  -> {self._path}  ({self._frames} frames, {secs:.1f}s)')
+            print(f'[REC] STOP  -> {self._path}  ({self._frames} frames, '
+                  f'{secs:.1f}s @ {self._fps:g}fps)')
+            self._retime()                      # rewrite to real-time playback
         self._writer = None
         self._path = None
+
+    def _retime(self):
+        """Headless/loaded renders rarely hit the target fps, so the raw clip
+        plays fast/slow. Re-encode it at the *measured* capture rate so playback
+        duration matches real time. Uses cv2 only (no ffmpeg)."""
+        if (self._t_first is None or self._t_last is None
+                or self._frames < 2 or self._size is None):
+            return
+        wall = self._t_last - self._t_first
+        if wall <= 0.1:
+            return
+        real_fps = (self._frames - 1) / wall
+        if abs(real_fps - self._fps) < 0.5:
+            return                              # already close enough
+        out = self._path.replace('.mp4', '_realtime.mp4')
+        cap = cv2.VideoCapture(self._path)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        wr = cv2.VideoWriter(out, fourcc, real_fps, self._size)
+        n = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            wr.write(frame)
+            n += 1
+        cap.release()
+        wr.release()
+        print(f'[REC] RETIMED -> {out}  ({n} frames @ {real_fps:.1f}fps, '
+              f'{n / real_fps:.1f}s real time)')
 
     # ── Frames ────────────────────────────────────────────────────────────────
     def _on_image(self, msg: Image):
         if self._path is None:
             return                              # not recording
         frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        now = time.monotonic()
         if self._writer is None:
             h, w = frame.shape[:2]
+            self._size = (w, h)
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             self._writer = cv2.VideoWriter(self._path, fourcc, self._fps, (w, h))
+            self._t_first = now
             print(f'[REC] REC   -> {self._path}  ({w}x{h})')
         self._writer.write(frame)
+        self._t_last = now
         self._frames += 1
 
     def destroy_node(self):
